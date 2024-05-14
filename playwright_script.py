@@ -3,7 +3,15 @@ import json
 import logging
 from datetime import datetime, timedelta
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
-from playwright.___main__ import main as playwright_install
+from playwright.sync_api import sync_playwright
+
+# Ensure that Playwright browsers are installed
+def install_playwright_browsers():
+    with sync_playwright() as p:
+        p.chromium.launch()  # This will download the Chromium browser if not already installed
+
+# Install Playwright browsers
+install_playwright_browsers()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -130,7 +138,6 @@ def save_configs(configs):
         json.dump(configs, f)
 
 if __name__ == "__main__":
-    playwright_install()  # Ensure that Playwright browsers are installed
     user_data = {
         "first_name": input("Enter your first name: "),
         "last_name": input("Enter your last name: "),
