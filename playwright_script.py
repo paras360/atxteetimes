@@ -17,6 +17,8 @@ logger = logging.getLogger(__name__)
 
 async def book_tee_time(date, time_of_day, user_data):
     async with async_playwright() as p:
+        browser = None
+        page = None
         try:
             browser = await p.chromium.launch(headless=True)  # Set headless to True
             page = await browser.new_page()
@@ -91,7 +93,8 @@ async def book_tee_time(date, time_of_day, user_data):
         except Exception as e:
             logger.error(f"An unexpected error occurred: {e}")
         finally:
-            await browser.close()
+            if browser:
+                await browser.close()
 
     return None
 
@@ -134,13 +137,3 @@ def load_configs():
 def save_configs(configs):
     with open('configs.json', 'w') as f:
         json.dump(configs, f)
-
-if __name__ == "__main__":
-    user_data = {
-        "first_name": input("Enter your first name: "),
-        "last_name": input("Enter your last name: "),
-        "phone": input("Enter your phone: "),
-        "email": input("Enter your email: "),
-    }
-    selected_date = input("Enter the date in mm/dd/yyyy format: ")
-    asyncio.run(main(selected_date, user_data))

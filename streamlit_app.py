@@ -42,6 +42,11 @@ def display_bookings():
 st.subheader('Current and Future Bookings')
 display_bookings()
 
+# Helper function to run asyncio event loops in Streamlit
+async def run_automation(selected_date, user_data):
+    screenshots = await automate_booking(selected_date.strftime('%m/%d/%Y'), user_data)
+    return screenshots
+
 # Command to run the booking automation
 if st.button('Run Booking Automation'):
     st.write('Starting the booking process...')
@@ -53,7 +58,9 @@ if st.button('Run Booking Automation'):
         "email": email,
     }
 
-    screenshots = asyncio.run(automate_booking(selected_date.strftime('%m/%d/%Y'), user_data))
+    # Use asyncio to run the automation function safely
+    future_screenshots = asyncio.run_coroutine_threadsafe(run_automation(selected_date, user_data), asyncio.new_event_loop())
+    screenshots = future_screenshots.result()
 
     # Save the booking configuration
     if 'bookings' not in configs:
