@@ -1,11 +1,16 @@
 import asyncio
 import json
+import logging
 from datetime import datetime, timedelta
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 async def book_tee_time(date, time_of_day, user_data):
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)  # Set headless to True
+        browser = await p.chromium.launch(headless=True)  # Set headless to False for debugging
         page = await browser.new_page()
         
         try:
@@ -52,7 +57,7 @@ async def book_tee_time(date, time_of_day, user_data):
             
             # Select the first available tee time
             first_available_button = await page.query_selector('.cart-button')
-            if (first_available_button):
+            if first_available_button:
                 await first_available_button.click()
                 await page.wait_for_selector('form')
 
@@ -69,15 +74,18 @@ async def book_tee_time(date, time_of_day, user_data):
                 screenshot_path = f'screenshot_{date.replace("/", "-")}_{time_of_day.replace(":", "")}.png'
                 await page.screenshot(path=screenshot_path)
 
+                logger.info(f"Booking completed. Screenshot saved to {screenshot_path}")
                 return screenshot_path
             else:
-                print("No available tee times found.")
+                logger.info("No available tee times found.")
 
         except PlaywrightTimeoutError as e:
-            print(f"Timeout Error: {e}")
+            logger.error(f"Timeout Error: {e}")
+        except Exception as e:
+            logger.error(f"An unexpected error occurred: {e}")
         finally:
             await browser.close()
-
+    
     return None
 
 def get_optimal_time(day_of_week):
