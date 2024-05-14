@@ -3,6 +3,10 @@ import pandas as pd
 import asyncio
 from datetime import datetime
 from playwright_script import main as automate_booking, load_configs, save_configs
+from playwright.___main__ import main as playwright_install
+
+# Ensure that Playwright browsers are installed
+playwright_install()
 
 # Title of the Streamlit app
 st.title('ATX Tee Time Booking System')
@@ -45,7 +49,7 @@ if st.button('Run Booking Automation'):
         "phone": phone,
         "email": email,
     }
-    
+
     screenshots = asyncio.run(automate_booking(selected_date.strftime('%m/%d/%Y'), user_data))
     
     # Save the booking configuration

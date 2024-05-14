@@ -3,6 +3,7 @@ import json
 import logging
 from datetime import datetime, timedelta
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+from playwright.___main__ import main as playwright_install
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -10,14 +11,14 @@ logger = logging.getLogger(__name__)
 
 async def book_tee_time(date, time_of_day, user_data):
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)  # Set headless to False for debugging
-        page = await browser.new_page()
-        
         try:
+            browser = await p.chromium.launch(headless=True)  # Set headless to True
+            page = await browser.new_page()
+
             # Navigate to the booking search page and wait for it to load
             await page.goto('https://web2.myvscloud.com/wbwsc/txaustinwt.wsc/search.html?display=detail&module=GR')
             await page.wait_for_load_state('networkidle')
-
+            
             # Extra wait for any JavaScript to execute
             await asyncio.sleep(5)
 
@@ -129,6 +130,7 @@ def save_configs(configs):
         json.dump(configs, f)
 
 if __name__ == "__main__":
+    playwright_install()  # Ensure that Playwright browsers are installed
     user_data = {
         "first_name": input("Enter your first name: "),
         "last_name": input("Enter your last name: "),
