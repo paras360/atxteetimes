@@ -3,12 +3,11 @@ import pandas as pd
 import asyncio
 from datetime import datetime
 from playwright_script import main as automate_booking, load_configs, save_configs
-from playwright.sync_api import sync_playwright
+import subprocess
 
 # Ensure that Playwright browsers are installed
 def install_playwright_browsers():
-    with sync_playwright() as p:
-        p.chromium.launch()  # This will download the Chromium browser if not already installed
+    subprocess.run(["playwright", "install"], check=True)
 
 install_playwright_browsers()
 
@@ -46,16 +45,16 @@ display_bookings()
 # Command to run the booking automation
 if st.button('Run Booking Automation'):
     st.write('Starting the booking process...')
-    
+
     user_data = {
         "first_name": first_name,
         "last_name": last_name,
         "phone": phone,
         "email": email,
     }
-    
+
     screenshots = asyncio.run(automate_booking(selected_date.strftime('%m/%d/%Y'), user_data))
-    
+
     # Save the booking configuration
     if 'bookings' not in configs:
         configs['bookings'] = []

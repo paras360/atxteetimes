@@ -3,14 +3,12 @@ import json
 import logging
 from datetime import datetime, timedelta
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
-from playwright.sync_api import sync_playwright
+import subprocess
 
 # Ensure that Playwright browsers are installed
 def install_playwright_browsers():
-    with sync_playwright() as p:
-        p.chromium.launch()  # This will download the Chromium browser if not already installed
+    subprocess.run(["playwright", "install"], check=True)
 
-# Install Playwright browsers
 install_playwright_browsers()
 
 # Configure logging
@@ -26,7 +24,7 @@ async def book_tee_time(date, time_of_day, user_data):
             # Navigate to the booking search page and wait for it to load
             await page.goto('https://web2.myvscloud.com/wbwsc/txaustinwt.wsc/search.html?display=detail&module=GR')
             await page.wait_for_load_state('networkidle')
-            
+
             # Extra wait for any JavaScript to execute
             await asyncio.sleep(5)
 
@@ -63,7 +61,7 @@ async def book_tee_time(date, time_of_day, user_data):
 
             # Wait for the booking results to load
             await page.wait_for_selector('.group__inner', timeout=30000)
-            
+
             # Select the first available tee time
             first_available_button = await page.query_selector('.cart-button')
             if first_available_button:
@@ -94,7 +92,7 @@ async def book_tee_time(date, time_of_day, user_data):
             logger.error(f"An unexpected error occurred: {e}")
         finally:
             await browser.close()
-    
+
     return None
 
 def get_optimal_time(day_of_week):
@@ -106,7 +104,7 @@ def get_optimal_time(day_of_week):
 async def main(selected_date, user_data):
     day_of_week = datetime.strptime(selected_date, '%m/%d/%Y').weekday()
     time_of_day = get_optimal_time(day_of_week)
-    
+
     # Determine when to run the scraper based on booking rules
     if day_of_week in [5, 6]:  # Saturday or Sunday
         # Scraper should run on Tuesday at 9:00 am
@@ -119,10 +117,10 @@ async def main(selected_date, user_data):
 
     now = datetime.now()
     delay = (target_time - now).total_seconds()
-    
+
     if delay > 0:
         await asyncio.sleep(delay)
-    
+
     screenshot_path = await book_tee_time(selected_date, time_of_day, user_data)
     return screenshot_path
 
