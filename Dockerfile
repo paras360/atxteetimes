@@ -47,3 +47,6 @@ COPY . .
 
 # Expose the port on which Streamlit will run
 EXPOSE 8501
+
+# Run the Streamlit app when the container launches
+CMD ["streamlit", "run", "streamlit_app.py"]
