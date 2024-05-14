@@ -10,8 +10,16 @@ COPY requirements.txt .
 RUN pip install --upgrade pip
 RUN pip install -r requirements.txt
 
-# Install the system dependencies required by Playwright
-RUN apt-get update && apt-get install -y \
+# Ensure apt is updated and necessary packages are installed
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    apt-transport-https \
+    ca-certificates \
+    gnupg \
+    wget
+
+# Fix missing GPG keys and install essential system libraries needed by Playwright
+RUN wget -q -O - https://deb.debian.org/debian-archive/debian-archive-keyring.gpg | apt-key add - && \
+    apt-get update && apt-get install -y --no-install-recommends \
     libnss3 \
     libnspr4 \
     libatk1.0-0 \
@@ -39,6 +47,3 @@ COPY . .
 
 # Expose the port on which Streamlit will run
 EXPOSE 8501
-
-# Run the Streamlit app when the container launches
-CMD ["streamlit", "run", "streamlit_app.py"]
