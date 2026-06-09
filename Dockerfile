@@ -1,35 +1,27 @@
-FROM python:3.9-slim
+# Multi-stage build: React frontend -> FastAPI backend (curl_cffi scraper, no browser)
+FROM node:20-alpine AS frontend-builder
+WORKDIR /app/frontend
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend/ .
+RUN npm run build
 
-# Set the working directory
+FROM python:3.12-slim
 WORKDIR /app
 
-# Copy the requirements file first for better caching
-COPY requirements.txt .
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app
 
-# Install the Python dependencies
-RUN pip install --upgrade pip
-RUN pip install -r requirements.txt
+# Install Python dependencies (curl_cffi ships its own impersonating libcurl).
+COPY backend/requirements.txt ./backend/requirements.txt
+RUN pip install --no-cache-dir -r backend/requirements.txt
 
-# Ensure apt is updated and install wget and gpg for key management
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    apt-transport-https \
-    ca-certificates \
-    gnupg \
-    wget
+# Backend code + built frontend.
+COPY backend/ ./backend/
+COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 
-# Add the Docker public key and ensure the system is updated securely
-RUN wget -q -O - https://deb.debian.org/debian-archive/debian-archive-keyring.gpg | apt-key add -
+# SQLite lives on a mounted volume for persistence across redeploys.
+RUN mkdir -p /app/data
 
-# Install Playwright and its dependencies
-RUN pip install playwright
-RUN playwright install-deps
-RUN playwright install --with-deps
-
-# Copy the rest of the application code
-COPY . .
-
-# Expose the port on which Streamlit will run
-EXPOSE 8501
-
-# Run the Streamlit app when the container launches
-CMD ["streamlit", "run", "streamlit_app.py"]
+EXPOSE 8000
+CMD ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000"]

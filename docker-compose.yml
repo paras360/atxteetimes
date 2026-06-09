@@ -1,0 +1,28 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "80:8000"
+    environment:
+      - TZ=America/Chicago
+      - DATABASE_URL=sqlite:////app/data/atxteetimes.db
+      - ENABLE_SCHEDULER=true
+      - TIMEZONE=America/Chicago
+      - "JWT_SECRET=${JWT_SECRET:?set JWT_SECRET in .env - generate with python3 -c 'import secrets; print(secrets.token_urlsafe(48))'}"
+      - RESEND_API_KEY=${RESEND_API_KEY:-}
+      - EMAIL_FROM=${EMAIL_FROM:-onboarding@resend.dev}
+      - "BASE_URL=${BASE_URL:?set BASE_URL in .env to the public URL, e.g. http://YOUR_DROPLET_IP}"
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost}
+      - ALLOW_SIGNUP=${ALLOW_SIGNUP:-true}
+    volumes:
+      - teetimes-data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  teetimes-data:
