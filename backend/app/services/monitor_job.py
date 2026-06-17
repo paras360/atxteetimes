@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Optional
 
 from pytz import timezone
@@ -21,6 +21,8 @@ settings = get_settings()
 
 WEEKDAY = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
 _TZ = timezone(settings.timezone)
+ALERT_FRESHNESS = timedelta(minutes=60)
+QUIET_WINDOW_START_HOUR = 14  # Sunday 2pm CT through end of Monday CT.
 
 # Guards against overlapping runs if a scan ever outlives its interval.
 _scan_lock = asyncio.Lock()
@@ -53,6 +55,27 @@ def in_scan_window(now: datetime) -> bool:
     if wd == start and now.hour < settings.scan_start_hour:
         return False
     return True
+
+
+def _in_alert_quiet_window(now: datetime) -> bool:
+    """Suppress emails from Sunday 2pm CT through end of Monday CT."""
+    local_now = now.astimezone(_TZ)
+    weekday = local_now.weekday()
+    return weekday == WEEKDAY["mon"] or (
+        weekday == WEEKDAY["sun"] and local_now.hour >= QUIET_WINDOW_START_HOUR
+    )
+
+
+def _found_at_utc(found_at: datetime) -> datetime:
+    """Treat SQLite's naive CURRENT_TIMESTAMP values as UTC."""
+    if found_at.tzinfo is None:
+        return found_at.replace(tzinfo=dt_timezone.utc)
+    return found_at.astimezone(dt_timezone.utc)
+
+
+def _is_fresh_alert_candidate(slot: FoundSlot, now: datetime) -> bool:
+    cutoff = now.astimezone(dt_timezone.utc) - ALERT_FRESHNESS
+    return _found_at_utc(slot.found_at) >= cutoff
 
 
 def _to_minutes(time_str: str) -> int | None:
@@ -159,13 +182,17 @@ def _send_digest(db, email, watch: Watch, pending: list[FoundSlot]) -> bool:
         return False
 
 
-def _send_pending_digests(db, email, watches: list[Watch]) -> int:
-    """Retry all unnotified slots for each active watch.
+def _send_pending_digests(db, email, watches: list[Watch], now: datetime) -> int:
+    """Retry fresh, unnotified slots for each active watch.
 
-    This intentionally reads from the database after the scrape/match phase so
-    existing `notified=False` rows still get emailed if a previous Resend outage
-    or sandbox error is fixed while WebTrac is flaky or blocked.
+    Opportunity history remains visible in the dashboard, but email alert
+    candidates are intentionally stricter: no quiet-window emails and no stale
+    backlog emails after the retry freshness window has passed.
     """
+    if _in_alert_quiet_window(now):
+        logger.info("Alert quiet window active; skipping pending digest emails.")
+        return 0
+
     sent_slots = 0
     for watch in watches:
         pending = (
@@ -173,8 +200,16 @@ def _send_pending_digests(db, email, watches: list[Watch]) -> int:
             .filter(FoundSlot.watch_id == watch.id, FoundSlot.notified.is_(False))
             .all()
         )
-        if _send_digest(db, email, watch, pending):
-            sent_slots += len(pending)
+        eligible = [slot for slot in pending if _is_fresh_alert_candidate(slot, now)]
+        skipped = len(pending) - len(eligible)
+        if skipped:
+            logger.info(
+                "Watch %s has %d stale pending slot(s); keeping visible but not emailing.",
+                watch.id,
+                skipped,
+            )
+        if _send_digest(db, email, watch, eligible):
+            sent_slots += len(eligible)
     return sent_slots
 
 
@@ -251,7 +286,7 @@ def scan(force: bool = False, user_id: Optional[int] = None) -> dict:
             new_count = _collect_pending(db, w, matches)
             new_matches += new_count
 
-        pending_alerts_sent = _send_pending_digests(db, email, watches)
+        pending_alerts_sent = _send_pending_digests(db, email, watches, now)
 
         return {
             "ran": True, "in_window": True, "dates_scanned": dates_scanned,
