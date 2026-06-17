@@ -103,15 +103,14 @@ def upcoming_dates(now: datetime, days: set[str]) -> dict[str, str]:
     return out
 
 
-def _collect_pending(db, watch: Watch, matches: list[Slot]) -> tuple[list[FoundSlot], int]:
-    """Record matches and return the FoundSlot rows that still need an email.
+def _collect_pending(db, watch: Watch, matches: list[Slot]) -> int:
+    """Record matches and return the number of brand-new slots seen.
 
     De-dup is keyed on (watch, course, date, time). A slot already recorded and
-    notified is skipped so we never resend the same alert. A row whose email
-    previously failed (notified=False) is retried. Returns (pending_rows, new_count)
-    where new_count is the number of brand-new slots seen this scan.
+    notified is skipped so we never resend the same alert. Pending email rows
+    are retried separately from the database after scanning, so retries are not
+    dependent on WebTrac returning the same slot again.
     """
-    pending: list[FoundSlot] = []
     new_count = 0
     for slot in matches:
         existing = (
@@ -126,23 +125,20 @@ def _collect_pending(db, watch: Watch, matches: list[Slot]) -> tuple[list[FoundS
             )
             db.add(record)
             new_count += 1
-            pending.append(record)
         else:
             existing.open_slots = slot.open_slots
-            if not existing.notified:
-                pending.append(existing)
     db.commit()
-    return pending, new_count
+    return new_count
 
 
-def _send_digest(db, email, watch: Watch, pending: list[FoundSlot]) -> None:
+def _send_digest(db, email, watch: Watch, pending: list[FoundSlot]) -> bool:
     """Send a single digest email for all pending slots on a watch.
 
     Marks rows notified only if the email actually goes out, so a failed send is
-    retried (in the next digest) rather than lost.
+    retried in a later digest rather than lost.
     """
     if not pending:
-        return
+        return False
     for r in pending:
         db.refresh(r)
     pending.sort(key=lambda r: (r.date, _to_minutes(r.time) or 0))
@@ -154,11 +150,32 @@ def _send_digest(db, email, watch: Watch, pending: list[FoundSlot]) -> None:
             r.notified = True
         db.commit()
         logger.info("Digest sent for watch %s: %d slot(s)", watch.id, len(pending))
+        return True
     else:
         logger.warning(
-            "Watch %s has %d new slot(s) but email failed; will retry next scan.",
+            "Watch %s has %d pending slot(s) but email failed; will retry later.",
             watch.id, len(pending),
         )
+        return False
+
+
+def _send_pending_digests(db, email, watches: list[Watch]) -> int:
+    """Retry all unnotified slots for each active watch.
+
+    This intentionally reads from the database after the scrape/match phase so
+    existing `notified=False` rows still get emailed if a previous Resend outage
+    or sandbox error is fixed while WebTrac is flaky or blocked.
+    """
+    sent_slots = 0
+    for watch in watches:
+        pending = (
+            db.query(FoundSlot)
+            .filter(FoundSlot.watch_id == watch.id, FoundSlot.notified.is_(False))
+            .all()
+        )
+        if _send_digest(db, email, watch, pending):
+            sent_slots += len(pending)
+    return sent_slots
 
 
 def scan(force: bool = False, user_id: Optional[int] = None) -> dict:
@@ -231,15 +248,18 @@ def scan(force: bool = False, user_id: Optional[int] = None) -> dict:
                             continue
                         matches.append(s)
 
-            pending, new_count = _collect_pending(db, w, matches)
+            new_count = _collect_pending(db, w, matches)
             new_matches += new_count
-            # One digest email per watch per scan, only for slots not yet alerted.
-            _send_digest(db, email, w, pending)
+
+        pending_alerts_sent = _send_pending_digests(db, email, watches)
 
         return {
             "ran": True, "in_window": True, "dates_scanned": dates_scanned,
             "total_slots": total_slots, "new_matches": new_matches,
-            "message": f"Scanned {len(dates_scanned)} date(s); {new_matches} new match(es).",
+            "message": (
+                f"Scanned {len(dates_scanned)} date(s); {new_matches} new match(es); "
+                f"{pending_alerts_sent} pending alert(s) sent."
+            ),
         }
     finally:
         db.close()
