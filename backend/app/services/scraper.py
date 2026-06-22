@@ -21,6 +21,11 @@ settings = get_settings()
 BASE = settings.webtrac_base_url.rstrip("/")
 BOOTSTRAP_URL = f"{BASE}/search.html?display=detail&module=GR"
 
+# (connect, read) timeouts. A tuple makes curl_cffi enforce a hard connect cap
+# in addition to the read cap, so a throttled/slow-walling server can't hold a
+# single request open for many minutes.
+_TIMEOUT = (settings.connect_timeout, settings.request_timeout)
+
 COURSES = {
     1: "Jimmy Clay Golf Course",
     2: "Roy Kizer Golf Course",
@@ -134,7 +139,7 @@ class TeeTimeScraper:
         if self._token and not force:
             return self._token
         session = self._ensure_session()
-        boot = session.get(BOOTSTRAP_URL, timeout=settings.request_timeout)
+        boot = session.get(BOOTSTRAP_URL, timeout=_TIMEOUT)
         if boot.status_code != 200 or "Attention Required" in boot.text:
             raise CloudflareBlocked(f"bootstrap status {boot.status_code}")
         token = _extract_csrf(boot.text)
@@ -172,12 +177,12 @@ class TeeTimeScraper:
         session = self._ensure_session()
         token = self._ensure_token()
         url = _search_url(token, begindate, holes=holes, course_id=course_id)
-        r = session.get(url, headers={"referer": BOOTSTRAP_URL}, timeout=settings.request_timeout)
+        r = session.get(url, headers={"referer": BOOTSTRAP_URL}, timeout=_TIMEOUT)
         if r.status_code != 200 or "Attention Required" in r.text:
             # Token may be stale/expired; refresh once and retry.
             token = self._ensure_token(force=True)
             url = _search_url(token, begindate, holes=holes, course_id=course_id)
-            r = session.get(url, headers={"referer": BOOTSTRAP_URL}, timeout=settings.request_timeout)
+            r = session.get(url, headers={"referer": BOOTSTRAP_URL}, timeout=_TIMEOUT)
             if r.status_code != 200 or "Attention Required" in r.text:
                 raise CloudflareBlocked(f"search status {r.status_code}")
         return parse_results(r.text)

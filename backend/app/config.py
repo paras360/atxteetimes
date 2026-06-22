@@ -29,7 +29,7 @@ class Settings(BaseSettings):
 
     # Email (Resend)
     resend_api_key: str = ""
-    email_from: str = "onboarding@resend.dev"
+    email_from: str = "alerts@stoutoilandgas.com"
     base_url: str = "http://localhost:8000"
 
     # CORS
@@ -37,7 +37,12 @@ class Settings(BaseSettings):
 
     # WebTrac scraping
     webtrac_base_url: str = "https://txaustinweb.myvscloud.com/webtrac/web"
-    request_timeout: int = 30  # seconds
+    request_timeout: int = 30      # per-request read timeout (seconds)
+    connect_timeout: int = 10      # per-request connect timeout (seconds)
+    # Hard ceiling on a single scan cycle. Once exceeded, the scan stops issuing
+    # new fetches so a slow/throttled site can't hold the scan lock for many
+    # minutes and starve every subsequent scheduled run.
+    scan_budget_seconds: int = 240
     # Off by default: the slim Docker image does not bundle Playwright/browsers.
     # Enable only if playwright + browsers are installed (see DEPLOY.md).
     use_playwright_fallback: bool = False

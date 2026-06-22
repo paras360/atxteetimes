@@ -57,7 +57,7 @@ JWT_SECRET=your-strong-secret
 
 # Optional for local dev - leave RESEND_API_KEY blank to skip real emails
 RESEND_API_KEY=
-EMAIL_FROM=onboarding@resend.dev
+EMAIL_FROM=alerts@stoutoilandgas.com
 BASE_URL=http://localhost:5173
 
 DATABASE_URL=sqlite:///./atxteetimes.db
@@ -95,7 +95,7 @@ scanner, database, and UI via Docker Compose.
 | --- | --- | --- |
 | `JWT_SECRET` | Signs auth tokens (required in production) | insecure default (dev only) |
 | `RESEND_API_KEY` | Resend API key for emails | empty (emails skipped) |
-| `EMAIL_FROM` | From address | `onboarding@resend.dev` |
+| `EMAIL_FROM` | From address (must be on a Resend-verified domain) | `alerts@stoutoilandgas.com` |
 | `BASE_URL` | Public app URL used in email links | `http://localhost:8000` |
 | `ALLOW_SIGNUP` | Allow new account creation | `true` |
 | `DATABASE_URL` | SQLAlchemy URL | `sqlite:///./atxteetimes.db` |

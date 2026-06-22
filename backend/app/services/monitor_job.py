@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Optional
 
@@ -22,6 +23,9 @@ settings = get_settings()
 WEEKDAY = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
 _TZ = timezone(settings.timezone)
 ALERT_FRESHNESS = timedelta(minutes=60)
+# A tee time must be at least this far in the future to be worth alerting on; a
+# slot starting in a couple of minutes is effectively unbookable.
+SLOT_BOOKING_LEAD = timedelta(minutes=15)
 QUIET_WINDOW_START_HOUR = 14  # Sunday 2pm CT through end of Monday CT.
 
 # Guards against overlapping runs if a scan ever outlives its interval.
@@ -107,6 +111,32 @@ def _within(window_start: str, window_end: str, slot_time: str) -> bool:
     return start <= t <= end
 
 
+def _slot_datetime(date_str: str, time_str: str) -> datetime | None:
+    """Combine 'MM/DD/YYYY' + '6:10 am' into a timezone-aware CT datetime."""
+    minutes = _to_minutes(time_str)
+    if minutes is None:
+        return None
+    try:
+        day = datetime.strptime(date_str, "%m/%d/%Y")
+    except (ValueError, TypeError):
+        return None
+    naive = day.replace(hour=minutes // 60, minute=minutes % 60)
+    return _TZ.localize(naive)
+
+
+def _is_future_slot(slot: Slot, now: datetime) -> bool:
+    """True only if the tee time is still ahead of `now` (plus a booking lead).
+
+    Without this, a morning slot that frees up later in the day (e.g. a 6:10 am
+    cancellation surfacing at 10 am) would be alerted even though it has already
+    passed.
+    """
+    slot_dt = _slot_datetime(slot.date, slot.time)
+    if slot_dt is None:
+        return False
+    return slot_dt >= now.astimezone(_TZ) + SLOT_BOOKING_LEAD
+
+
 def watch_course_ids(watch: Watch) -> list[int]:
     if watch.course_ids == "all":
         return ALL_COURSE_IDS
@@ -182,14 +212,16 @@ def _send_digest(db, email, watch: Watch, pending: list[FoundSlot]) -> bool:
         return False
 
 
-def _send_pending_digests(db, email, watches: list[Watch], now: datetime) -> int:
+def _send_pending_digests(db, email, watches: list[Watch], now: datetime,
+                          force: bool = False) -> int:
     """Retry fresh, unnotified slots for each active watch.
 
     Opportunity history remains visible in the dashboard, but email alert
     candidates are intentionally stricter: no quiet-window emails and no stale
-    backlog emails after the retry freshness window has passed.
+    backlog emails after the retry freshness window has passed. A forced/manual
+    "Scan now" bypasses the quiet window so the user always gets the email.
     """
-    if _in_alert_quiet_window(now):
+    if not force and _in_alert_quiet_window(now):
         logger.info("Alert quiet window active; skipping pending digest emails.")
         return 0
 
@@ -259,7 +291,17 @@ def scan(force: bool = False, user_id: Optional[int] = None) -> dict:
 
         scraper = TeeTimeScraper()
         results: dict[tuple[str, int, int], list[Slot]] = {}
-        for dt, holes, cid in needed:
+        deadline = time.monotonic() + settings.scan_budget_seconds
+        budget_hit = False
+        for dt, holes, cid in sorted(needed):
+            if time.monotonic() >= deadline:
+                budget_hit = True
+                logger.warning(
+                    "Scan budget of %ds exceeded; skipping remaining %d fetch(es) this cycle.",
+                    settings.scan_budget_seconds,
+                    len(needed) - len(results),
+                )
+                break
             try:
                 slots = scraper.fetch(dt, holes=holes, course_id=cid)
                 results[(dt, holes, cid)] = slots
@@ -267,7 +309,8 @@ def scan(force: bool = False, user_id: Optional[int] = None) -> dict:
             except Exception as e:  # noqa: BLE001
                 logger.error("Scan fetch failed for %s (%d holes, course %s): %s", dt, holes, cid, e)
                 results[(dt, holes, cid)] = []
-        dates_scanned = sorted({dt for dt, _, _ in needed})
+        # Only count dates we actually fetched, so the UI reflects real coverage.
+        dates_scanned = sorted({dt for (dt, _, _) in results})
 
         for w in watches:
             wdays = set(w.target_days.split(","))
@@ -281,19 +324,22 @@ def scan(force: bool = False, user_id: Optional[int] = None) -> dict:
                             continue
                         if not _within(w.window_start, w.window_end, s.time):
                             continue
+                        if not _is_future_slot(s, now):
+                            continue
                         matches.append(s)
 
             new_count = _collect_pending(db, w, matches)
             new_matches += new_count
 
-        pending_alerts_sent = _send_pending_digests(db, email, watches, now)
+        pending_alerts_sent = _send_pending_digests(db, email, watches, now, force=force)
 
+        budget_note = " (scan budget hit; coverage partial)" if budget_hit else ""
         return {
             "ran": True, "in_window": True, "dates_scanned": dates_scanned,
             "total_slots": total_slots, "new_matches": new_matches,
             "message": (
                 f"Scanned {len(dates_scanned)} date(s); {new_matches} new match(es); "
-                f"{pending_alerts_sent} pending alert(s) sent."
+                f"{pending_alerts_sent} pending alert(s) sent.{budget_note}"
             ),
         }
     finally:

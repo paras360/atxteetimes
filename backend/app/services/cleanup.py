@@ -12,7 +12,10 @@ settings = get_settings()
 
 def run_cleanup():
     """Delete found-slot records older than the retention window."""
-    cutoff = datetime.now(timezone.utc) - timedelta(days=settings.found_slot_retention_days)
+    # SQLite stores found_at via CURRENT_TIMESTAMP as a naive UTC string, so the
+    # cutoff must also be naive UTC for the comparison to be correct (a tz-aware
+    # value renders with an offset and breaks the string comparison).
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=settings.found_slot_retention_days)).replace(tzinfo=None)
     db = SessionLocal()
     try:
         deleted = (
