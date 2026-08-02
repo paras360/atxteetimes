@@ -70,8 +70,22 @@ SCRAPER_PROXY=http://username:password@proxy-host:port
 ```
 
 Use a residential/ISP proxy; datacenter proxies are usually banned in the same
-ranges. Then `docker compose up -d` and re-run the check above until it prints
-`200`.
+ranges. Then `docker compose up -d` (a rebuild is not needed, but the container
+must be recreated to pick up a new `.env`) and re-run the check above.
+
+Two things matter in that URL:
+
+- **Use a sticky port** (10000-19999), not the provider's rotating port. The
+  scraper holds a CSRF token and cookie across ~30 requests in a scan; a
+  rotating IP would present that one session from 30 different addresses.
+- **Target US IPs** (`username__cr.us` on DataImpulse). This is a City of Austin
+  site.
+
+Roughly half of residential exit IPs are already WAF-blocked, so a blocked fetch
+automatically hops to a different sticky port (up to `PROXY_MAX_IP_ATTEMPTS`,
+default 10) instead of failing the scan. At a ~45% per-IP success rate, the odds
+of all 10 failing are under 0.1%, so the circuit breaker should never fire while
+a proxy is configured.
 
 A circuit breaker backs off exponentially (5 min up to 60 min) once blocked, so
 the app stops hammering the WAF - repeated retries are what entrench a ban. The

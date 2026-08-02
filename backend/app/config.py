@@ -47,10 +47,17 @@ class Settings(BaseSettings):
     # site's WAF bans datacenter IP ranges outright, so a residential/ISP proxy
     # is the only reliable egress from a cloud host.
     scraper_proxy: str = ""
-    # Circuit breaker: after a block, stop scraping and back off exponentially
-    # instead of retrying every cycle. Hammering a WAF entrenches the ban.
+    # Sticky-session port range. The provider binds one residential IP per port,
+    # so changing port is how we change exit IP. Roughly half of residential IPs
+    # are already WAF-blocked, so a blocked fetch hops ports rather than giving
+    # up -- far better than pausing scanning.
+    proxy_port_min: int = 10000
+    proxy_port_max: int = 19999
+    proxy_max_ip_attempts: int = 10
+    # Circuit breaker: only after every IP attempt fails does scanning back off.
+    # With a working proxy this should effectively never trigger.
     block_backoff_start_minutes: int = 5
-    block_backoff_max_minutes: int = 60
+    block_backoff_max_minutes: int = 30
     # How long a bootstrapped CSRF token is reused before being refreshed. The
     # HTTP session outlives a single scan, so raising this cuts bootstrap
     # requests (and TLS handshakes) without risking many stale-token retries.
@@ -78,6 +85,10 @@ class Settings(BaseSettings):
     # window). Otherwise every future date alerts as one huge unbookable batch
     # the moment it appears in results.
     require_bookable: bool = True
+    # A date beyond the booking window returns a full page of uncartable rows,
+    # so re-fetching it every 5 minutes is pure proxy bandwidth. Check those
+    # dates this often instead; they revert to full-rate once bookable.
+    unbookable_recheck_minutes: int = 30
     # Cap rows in one digest so a mass re-detection can't send a wall of slots.
     max_slots_per_email: int = 25
     # Warn once the scraper has been blocked this long, then repeat at most

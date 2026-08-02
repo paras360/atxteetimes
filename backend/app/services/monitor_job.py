@@ -34,6 +34,11 @@ _scan_lock = asyncio.Lock()
 # Cooldown anchor for the "scraper is blocked" warning email.
 _last_blocked_alert_at: datetime | None = None
 
+# date (MM/DD/YYYY) -> when it's worth re-fetching. Dates outside the site's
+# booking window render a full page of uncartable rows, so polling them every
+# cycle just burns proxy bandwidth.
+_unbookable_until: dict[str, datetime] = {}
+
 # Last scan summary, surfaced to the UI for scanner-health display.
 _last_scan: dict = {
     "at": None, "ran": False, "in_window": False, "message": "No scan yet.",
@@ -336,7 +341,18 @@ def scan(force: bool = False, user_id: Optional[int] = None) -> dict:
         deadline = time.monotonic() + settings.scan_budget_seconds
         budget_hit = False
         blocked = False
+        throttled_dates = {
+            dt for (dt, _, _) in needed
+            if _unbookable_until.get(dt) and now < _unbookable_until[dt]
+        }
+        if throttled_dates:
+            logger.info(
+                "Skipping %d date(s) outside the booking window this cycle: %s",
+                len(throttled_dates), ", ".join(sorted(throttled_dates)),
+            )
         for dt, holes, cid in sorted(needed):
+            if dt in throttled_dates:
+                continue
             if time.monotonic() >= deadline:
                 budget_hit = True
                 logger.warning(
@@ -360,6 +376,22 @@ def scan(force: bool = False, user_id: Optional[int] = None) -> dict:
                 results[(dt, holes, cid)] = []
         # Only count dates we actually fetched, so the UI reflects real coverage.
         dates_scanned = sorted({dt for (dt, _, _) in results})
+
+        # A date that returned rows but nothing cartable is outside the booking
+        # window; damp it down until it's worth another look.
+        cooldown = timedelta(minutes=settings.unbookable_recheck_minutes)
+        for dt in dates_scanned:
+            day_slots = [s for (d, _, _), v in results.items() if d == dt for s in v]
+            if not day_slots:
+                continue
+            if any(s.bookable for s in day_slots):
+                _unbookable_until.pop(dt, None)
+            else:
+                _unbookable_until[dt] = now + cooldown
+                logger.info(
+                    "%s has %d slot(s) but none bookable yet; rechecking after %s.",
+                    dt, len(day_slots), (now + cooldown).strftime("%H:%M"),
+                )
 
         for w in watches:
             wdays = set(w.target_days.split(","))

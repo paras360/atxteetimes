@@ -7,6 +7,7 @@ Playwright fallback loads the same pages in a real browser.
 from __future__ import annotations
 
 import logging
+import random
 import re
 import threading
 from dataclasses import dataclass
@@ -37,6 +38,7 @@ COURSES = {
 }
 
 _CSRF_RE = re.compile(r'name="_csrf_token"[^>]*value="([^"]+)"')
+_PROXY_PORT_RE = re.compile(r":(\d+)$")
 
 
 @dataclass
@@ -255,6 +257,7 @@ class _Circuit:
             "consecutive_blocks": self.consecutive_blocks,
             "reason": self.last_reason,
             "using_proxy": bool(settings.scraper_proxy),
+            "exit_port": _shared_scraper._port if _shared_scraper else None,
         }
 
 
@@ -290,17 +293,33 @@ class TeeTimeScraper:
         self._session = None
         self._token: str | None = None
         self._token_at: datetime | None = None
+        self._port: int | None = None
+
+    def _proxy_url(self) -> str | None:
+        """Current proxy URL with the sticky port swapped in."""
+        base = settings.scraper_proxy
+        if not base:
+            return None
+        if self._port is None:
+            self._port = random.randint(settings.proxy_port_min, settings.proxy_port_max)
+        return _PROXY_PORT_RE.sub(f":{self._port}", base)
+
+    def _rotate_ip(self) -> None:
+        """Move to a different sticky port, i.e. a different residential IP."""
+        self._port = random.randint(settings.proxy_port_min, settings.proxy_port_max)
+        self.reset(keep_port=True)
 
     def _ensure_session(self):
         if self._session is None:
             from curl_cffi import requests as cffi
             kwargs = {"impersonate": "chrome"}
-            if settings.scraper_proxy:
-                kwargs["proxy"] = settings.scraper_proxy
+            proxy = self._proxy_url()
+            if proxy:
+                kwargs["proxy"] = proxy
             self._session = cffi.Session(**kwargs)
         return self._session
 
-    def reset(self) -> None:
+    def reset(self, keep_port: bool = False) -> None:
         """Drop the session and token so the next fetch starts clean."""
         if self._session is not None:
             try:
@@ -310,6 +329,8 @@ class TeeTimeScraper:
         self._session = None
         self._token = None
         self._token_at = None
+        if not keep_port:
+            self._port = None
 
     def _token_expired(self) -> bool:
         if self._token_at is None:
@@ -345,32 +366,50 @@ class TeeTimeScraper:
                 f"circuit open until {circuit.open_until.isoformat(timespec='seconds')} "
                 f"({circuit.last_reason})"
             )
-        try:
-            slots = self._fetch_curl(begindate, holes, course_id)
-        except CloudflareBlocked as e:
-            # Start the post-backoff attempt from a clean session rather than
-            # replaying cookies the site has already rejected.
-            self.reset()
-            if not settings.use_playwright_fallback:
-                circuit.record_block(str(e))
-                logger.error(
-                    "Scrape blocked (%s). A hard WAF ban blocks real browsers too, so "
-                    "Playwright will not help - set SCRAPER_PROXY to a residential/ISP "
-                    "proxy. See DEPLOY.md.", e,
-                )
-                raise
-            logger.warning("curl_cffi blocked; trying Playwright fallback for %s", begindate)
+
+        # About half of residential exit IPs are already WAF-blocked, so treat a
+        # block as "bad IP" and hop sticky ports rather than failing the scan.
+        attempts = settings.proxy_max_ip_attempts if settings.scraper_proxy else 1
+        last_error: CloudflareBlocked | None = None
+        for attempt in range(1, attempts + 1):
             try:
-                slots = self._fetch_playwright(begindate, holes, course_id)
-            except ImportError as imp:
-                circuit.record_block(str(e))
-                raise RuntimeError(
-                    "USE_PLAYWRIGHT_FALLBACK is on but playwright is not installed. "
-                    "Add playwright to requirements and run `playwright install chromium`."
-                ) from imp
-            except Exception:
-                circuit.record_block(str(e))
-                raise
+                slots = self._fetch_curl(begindate, holes, course_id)
+            except CloudflareBlocked as e:
+                last_error = e
+                if attempt < attempts:
+                    logger.debug("Exit IP blocked (%s); rotating (attempt %d/%d).",
+                                 e, attempt, attempts)
+                    self._rotate_ip()
+                    continue
+                break
+            if attempt > 1:
+                logger.info("Found a working exit IP after %d attempt(s).", attempt)
+            circuit.record_success()
+            return slots
+
+        # Every IP we tried was refused: fall back to Playwright if enabled,
+        # otherwise trip the breaker so we stop hammering.
+        self.reset()
+        if not settings.use_playwright_fallback:
+            circuit.record_block(str(last_error))
+            logger.error(
+                "Blocked on %d exit IP(s) (%s). If SCRAPER_PROXY is unset, the host's own "
+                "IP is banned - set a residential/ISP proxy. See DEPLOY.md.",
+                attempts, last_error,
+            )
+            raise last_error
+        logger.warning("curl_cffi blocked; trying Playwright fallback for %s", begindate)
+        try:
+            slots = self._fetch_playwright(begindate, holes, course_id)
+        except ImportError as imp:
+            circuit.record_block(str(last_error))
+            raise RuntimeError(
+                "USE_PLAYWRIGHT_FALLBACK is on but playwright is not installed. "
+                "Add playwright to requirements and run `playwright install chromium`."
+            ) from imp
+        except Exception:
+            circuit.record_block(str(last_error))
+            raise
         circuit.record_success()
         return slots
 
