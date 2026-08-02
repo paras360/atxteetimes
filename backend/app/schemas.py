@@ -160,3 +160,4 @@ class ScanResultResponse(BaseModel):
     total_slots: int
     new_matches: int
     message: str
+    blocked: bool = False

@@ -33,6 +33,7 @@ PINK = "#ff4dd5"
 LIME = "#c1f32b"
 PERIWINKLE = "#6483ff"
 SPRING = "#c6dc3c"
+BUBBLEGUM = "#ee84d5"
 SAND = "#eadcce"
 INK = "#000000"
 FOG = "#999999"
@@ -156,9 +157,15 @@ class EmailService:
             time_word = "tee time" if count == 1 else "tee times"
             players_word = "player" if watch.num_players == 1 else "players"
 
+            # Cap the rows so a mass re-detection can't render a wall of slots.
+            # Every slot is still marked notified by the caller, so the overflow
+            # is never re-sent later.
+            shown = slots[: max(1, settings.max_slots_per_email)]
+            overflow = count - len(shown)
+
             row_html = []
-            for i, s in enumerate(slots):
-                last = i == count - 1
+            for i, s in enumerate(shown):
+                last = i == len(shown) - 1
                 border = "" if last else f"border-bottom:1px solid {HAIRLINE};"
                 row_html.append(f"""
                 <tr>
@@ -184,6 +191,7 @@ class EmailService:
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
               {''.join(row_html)}
             </table>
+            {f'<p style="{_text(14, INK, "-0.6px")}margin:14px 0 0;">+ {overflow} more open {"slot" if overflow == 1 else "slots"} &mdash; open WebTrac to see them all.</p>' if overflow else ''}
             <div style="padding-top:24px;">
               {_pill(SEARCH_URL, "Open WebTrac to book &rarr;", bg=SUN, color=INK, radius=160, pad="15px 26px")}
             </div>
@@ -253,6 +261,62 @@ class EmailService:
             return True
         except Exception as e:  # noqa: BLE001
             logger.error("Failed to send setup reminder to %s: %s", to_email, e)
+            return False
+
+
+    @classmethod
+    def send_scraper_blocked_email(cls, to_email: str, user_name: str,
+                                   blocked_for, reason: str) -> bool:
+        """Warn that the site is refusing our requests, so no alerts can arrive."""
+        if not settings.resend_api_key:
+            logger.warning("RESEND_API_KEY not set; skipping blocked alert to %s", to_email)
+            return False
+        try:
+            hours = int(blocked_for.total_seconds() // 3600)
+            minutes = int((blocked_for.total_seconds() % 3600) // 60)
+            duration = f"{hours}h {minutes}m" if hours else f"{minutes}m"
+            inner = f"""
+            {_tag("Scanner offline", bg=BUBBLEGUM)}
+            <h1 style="{_text(30, INK, '-1.02px', lh='1.05')}margin:16px 0 6px;">Tee-time scanning is blocked</h1>
+            <p style="{_text(18, INK, '-0.8px', lh='1.35')}margin:0 0 8px;">
+              Hi {user_name}, the Austin WebTrac site has been refusing our requests for {duration}.
+            </p>
+            <p style="{_text(16, FOG, '-0.7px', lh='1.45')}margin:0 0 20px;">
+              Until this clears, no tee times can be detected and you will not receive
+              alerts &mdash; even if times open up. Your watches are unchanged and will
+              resume automatically once access is restored.
+            </p>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+                   style="background:{SAND};border-radius:5px;">
+              <tr><td style="padding:16px 18px;">
+                <div style="{_text(12, FOG, '-0.5px')}">Reason reported</div>
+                <div style="{_text(16, INK, '-0.7px')}padding-top:5px;">{reason or "blocked by site"}</div>
+              </td></tr>
+            </table>
+            <div style="padding-top:24px;">
+              {_pill(SEARCH_URL, "Check WebTrac manually &rarr;", bg=SUN, color=INK, radius=160, pad="15px 26px")}
+            </div>
+            """
+            html = _shell(
+                preheader=f"Scanning has been blocked for {duration} - no alerts until it clears.",
+                inner=inner,
+                footer_note=(
+                    "You're receiving this because you have an active watch. We send this "
+                    "at most once every "
+                    f"{settings.blocked_alert_cooldown_hours} hours while scanning is down."
+                ),
+            )
+            params = {
+                "from": settings.email_from,
+                "to": [to_email],
+                "subject": f"Heads up: tee-time scanning is blocked ({duration})",
+                "html": html,
+            }
+            result = resend.Emails.send(params)
+            logger.info("Blocked alert sent to %s: %s", to_email, result)
+            return True
+        except Exception as e:  # noqa: BLE001
+            logger.error("Failed to send blocked alert to %s: %s", to_email, e)
             return False
 
 

@@ -15,6 +15,8 @@ services:
       - "BASE_URL=${BASE_URL:?set BASE_URL in .env to the public URL, e.g. http://YOUR_DROPLET_IP}"
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost}
       - ALLOW_SIGNUP=${ALLOW_SIGNUP:-true}
+      # Residential/ISP proxy for scraping; the site's WAF bans datacenter IPs.
+      - SCRAPER_PROXY=${SCRAPER_PROXY:-}
     volumes:
       - teetimes-data:/app/data
     healthcheck:

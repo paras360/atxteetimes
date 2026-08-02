@@ -49,10 +49,34 @@ survives rebuilds.
 - The scanner runs every 5 minutes, Tue 06:00 -> Sun 23:59 CT (configurable in
   `backend/app/config.py`). Mondays are off.
 - Cloudflare: the scraper uses `curl_cffi` Chrome impersonation, which passes
-  the site's bot check. If the droplet's datacenter IP ever gets hard-blocked,
-  set `USE_PLAYWRIGHT_FALLBACK=true` and add `playwright` to
-  `backend/requirements.txt` (heavier image), or route the scraper through a
-  cheap residential proxy.
+  the site's passive bot check.
+
+## Cloudflare blocks (403 "Attention Required")
+
+If scans start logging `bootstrap status 403`, the droplet's IP has been banned
+by the site's WAF. Confirm with:
+
+```bash
+docker compose exec -T app python -c "from curl_cffi import requests as r; print(r.Session(impersonate='chrome').get('https://txaustinweb.myvscloud.com/webtrac/web/search.html?display=detail&module=GR', timeout=(10,30)).status_code)"
+```
+
+`403` means a hard IP ban. This is **not** a solvable JS challenge, so
+`USE_PLAYWRIGHT_FALLBACK` will not help - a real browser on the same IP is
+blocked too. The fix is to change the egress IP:
+
+```bash
+# in .env on the droplet
+SCRAPER_PROXY=http://username:password@proxy-host:port
+```
+
+Use a residential/ISP proxy; datacenter proxies are usually banned in the same
+ranges. Then `docker compose up -d` and re-run the check above until it prints
+`200`.
+
+A circuit breaker backs off exponentially (5 min up to 60 min) once blocked, so
+the app stops hammering the WAF - repeated retries are what entrench a ban. The
+current state is visible at `/api/scan-status` under `scraper`, and account
+owners get a warning email after `BLOCKED_ALERT_AFTER_MINUTES` (default 120).
 
 ## Optional: HTTPS + domain
 Point a domain's A record at the droplet, then put Caddy in front (automatic

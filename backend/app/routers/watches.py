@@ -10,7 +10,7 @@ from ..schemas import (
 )
 from ..scheduler import get_scheduler
 from ..services.monitor_job import get_last_scan, in_scan_window, run_scan, _now
-from ..services.scraper import COURSES
+from ..services.scraper import COURSES, circuit
 
 router = APIRouter()
 
@@ -36,6 +36,7 @@ def scan_status(user: User = Depends(get_current_user)):
         "next_run": next_run,
         "in_window": in_scan_window(_now()),
         "last_scan": get_last_scan(),
+        "scraper": circuit.status(),
     }
 
 

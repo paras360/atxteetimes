@@ -11,9 +11,9 @@ from pytz import timezone
 
 from ..config import get_settings
 from ..db import SessionLocal
-from ..models import FoundSlot, Watch
+from ..models import FoundSlot, User, Watch
 from .email import get_email_service
-from .scraper import COURSES, TeeTimeScraper, Slot
+from .scraper import COURSES, CloudflareBlocked, Slot, circuit, get_scraper
 
 ALL_COURSE_IDS = sorted(COURSES.keys())
 
@@ -30,6 +30,9 @@ QUIET_WINDOW_START_HOUR = 14  # Sunday 2pm CT through end of Monday CT.
 
 # Guards against overlapping runs if a scan ever outlives its interval.
 _scan_lock = asyncio.Lock()
+
+# Cooldown anchor for the "scraper is blocked" warning email.
+_last_blocked_alert_at: datetime | None = None
 
 # Last scan summary, surfaced to the UI for scanner-health display.
 _last_scan: dict = {
@@ -245,6 +248,45 @@ def _send_pending_digests(db, email, watches: list[Watch], now: datetime,
     return sent_slots
 
 
+def _maybe_send_blocked_alert(db, email) -> bool:
+    """Warn account owners once the scraper has been blocked for a while.
+
+    Rate-limited by `blocked_alert_cooldown_hours` so a multi-day outage sends a
+    periodic nudge rather than one email every five minutes.
+    """
+    global _last_blocked_alert_at
+    if not settings.send_blocked_alerts:
+        return False
+
+    now_utc = datetime.now(dt_timezone.utc)
+    blocked_for = circuit.blocked_for(now_utc)
+    if blocked_for < timedelta(minutes=settings.blocked_alert_after_minutes):
+        return False
+    if _last_blocked_alert_at is not None:
+        cooldown = timedelta(hours=settings.blocked_alert_cooldown_hours)
+        if now_utc - _last_blocked_alert_at < cooldown:
+            return False
+
+    recipients = (
+        db.query(User)
+        .join(Watch, Watch.user_id == User.id)
+        .filter(Watch.active.is_(True))
+        .distinct()
+        .all()
+    )
+    sent = 0
+    for user in recipients:
+        if email.send_scraper_blocked_email(
+            to_email=user.email, user_name=user.name,
+            blocked_for=blocked_for, reason=circuit.last_reason,
+        ):
+            sent += 1
+    if sent:
+        _last_blocked_alert_at = now_utc
+        logger.warning("Sent scraper-blocked alert to %d recipient(s).", sent)
+    return bool(sent)
+
+
 def scan(force: bool = False, user_id: Optional[int] = None) -> dict:
     """Run one scan cycle. Returns a summary dict. Safe to call off the event loop.
 
@@ -289,10 +331,11 @@ def scan(force: bool = False, user_id: Optional[int] = None) -> dict:
                 for cid in watch_course_ids(w):
                     needed.add((dt, w.num_holes, cid))
 
-        scraper = TeeTimeScraper()
+        scraper = get_scraper()
         results: dict[tuple[str, int, int], list[Slot]] = {}
         deadline = time.monotonic() + settings.scan_budget_seconds
         budget_hit = False
+        blocked = False
         for dt, holes, cid in sorted(needed):
             if time.monotonic() >= deadline:
                 budget_hit = True
@@ -306,6 +349,12 @@ def scan(force: bool = False, user_id: Optional[int] = None) -> dict:
                 slots = scraper.fetch(dt, holes=holes, course_id=cid)
                 results[(dt, holes, cid)] = slots
                 total_slots += len(slots)
+            except CloudflareBlocked as e:
+                # One block means the whole host is blocked; retrying the other
+                # combos would just pile requests onto the WAF.
+                blocked = True
+                logger.error("Scan aborted - scraper blocked (%s).", e)
+                break
             except Exception as e:  # noqa: BLE001
                 logger.error("Scan fetch failed for %s (%d holes, course %s): %s", dt, holes, cid, e)
                 results[(dt, holes, cid)] = []
@@ -322,6 +371,8 @@ def scan(force: bool = False, user_id: Optional[int] = None) -> dict:
                     for s in results.get((dt, w.num_holes, cid), []):
                         if s.open_slots < w.num_players:
                             continue
+                        if settings.require_bookable and not s.bookable:
+                            continue
                         if not _within(w.window_start, w.window_end, s.time):
                             continue
                         if not _is_future_slot(s, now):
@@ -333,13 +384,21 @@ def scan(force: bool = False, user_id: Optional[int] = None) -> dict:
 
         pending_alerts_sent = _send_pending_digests(db, email, watches, now, force=force)
 
+        if blocked:
+            _maybe_send_blocked_alert(db, email)
+
         budget_note = " (scan budget hit; coverage partial)" if budget_hit else ""
+        blocked_note = (
+            f" BLOCKED: scraper is being refused by the site ({circuit.last_reason}); "
+            "set SCRAPER_PROXY to a residential proxy." if blocked else ""
+        )
         return {
             "ran": True, "in_window": True, "dates_scanned": dates_scanned,
             "total_slots": total_slots, "new_matches": new_matches,
+            "blocked": blocked,
             "message": (
                 f"Scanned {len(dates_scanned)} date(s); {new_matches} new match(es); "
-                f"{pending_alerts_sent} pending alert(s) sent.{budget_note}"
+                f"{pending_alerts_sent} pending alert(s) sent.{budget_note}{blocked_note}"
             ),
         }
     finally:
