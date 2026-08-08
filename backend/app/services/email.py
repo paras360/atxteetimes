@@ -1,9 +1,21 @@
 """Email notifications via Resend.
 
-The HTML follows the "Streamtime" creative-scrapbook style: a warm linen canvas,
-paper-white cards with hairline black borders, a single charcoal hero band, and
-sun-yellow pill actions. Everything is inlined and table-based so it survives the
-usual email-client CSS stripping.
+Visual system: "Dispatch". A warm bone canvas carries near-black ink, hierarchy
+comes from typographic scale rather than weight, and every machine-generated
+value -- times, dates, slot counts -- is set in tracked monospace so the tee
+sheet reads like a departure board rather than a marketing email.
+
+Two rules hold the system together:
+
+* Exactly one chromatic element. Signal red appears only where a decision is
+  being asked for, so scarcity does the work that shouting would otherwise do.
+* Exactly one rounded element. Every edge is square except the primary action
+  pill, which makes the single decision impossible to miss without a colour
+  change or a drop shadow.
+
+Everything is inlined and table-based so it survives the usual email-client CSS
+stripping, and no layout depends on border-radius or background-image (both of
+which Outlook's Word renderer drops).
 """
 import logging
 from datetime import datetime
@@ -23,36 +35,46 @@ if settings.resend_api_key:
 SEARCH_URL = f"{settings.webtrac_base_url.rstrip('/')}/search.html?display=detail&module=GR"
 
 # ---------------------------------------------------------------------------
-# Style tokens (Streamtime)
+# Style tokens (Dispatch)
 # ---------------------------------------------------------------------------
-LINEN = "#f1e8de"
-PAPER = "#fbf8f5"
+CANVAS = "#e9e6e1"    # warm bone page ground
+PAPER = "#f7f5f2"     # parchment card surface
+INK = "#191919"       # near-black: all text, all borders
+FLARE = "#fe3a3a"     # the only chromatic value, reserved for the decision
+GRAPHITE = "#6f6b66"  # muted metadata
+HAIRLINE = "#d5d0c9"  # warm rules between rows
 WHITE = "#ffffff"
-CHARCOAL = "#2f2c29"
-SUN = "#ffde3b"
-PINK = "#ff4dd5"
-LIME = "#c1f32b"
-PERIWINKLE = "#6483ff"
-SPRING = "#c6dc3c"
-BUBBLEGUM = "#ee84d5"
-SAND = "#eadcce"
-INK = "#000000"
-FOG = "#999999"
-HAIRLINE = "#e7dccd"
 
-_STACK_STD = ("'Ease Standard',-apple-system,BlinkMacSystemFont,'Segoe UI',"
-              "Roboto,Helvetica,Arial,sans-serif")
-_STACK_DISP = ("'Ease Display',-apple-system,BlinkMacSystemFont,'Segoe UI',"
-               "Roboto,Helvetica,Arial,sans-serif")
+# Helvetica is the closest universally-available stand-in for the tight
+# neo-grotesque display face; the mono stack degrades to Menlo/Consolas, which
+# hold tracking well enough to keep the departure-board rhythm.
+_SANS = "'Helvetica Neue',Helvetica,Arial,sans-serif"
+_MONO = "'IBM Plex Mono','SFMono-Regular',Menlo,Consolas,'Courier New',monospace"
 
 
-def _text(size: int, color: str, tracking: str, lh: str = "1.2",
-          display: bool = False) -> str:
-    """Return an inline font style string (single 400 weight, tight tracking)."""
-    stack = _STACK_DISP if display else _STACK_STD
+def _disp(size: int, color: str = INK, tracking: str = "-0.03em",
+          lh: str = "0.92") -> str:
+    """Display type: large, weight 400, tightly tracked. Scale is the hierarchy."""
     return (
-        f"font-family:{stack};font-weight:400;font-size:{size}px;"
+        f"font-family:{_SANS};font-weight:400;font-size:{size}px;"
         f"line-height:{lh};letter-spacing:{tracking};color:{color};"
+        f"mso-line-height-rule:exactly;"
+    )
+
+
+def _mono(size: int, color: str = GRAPHITE, tracking: str = "0.09em",
+          lh: str = "1.4") -> str:
+    """Monospace: every machine-generated value and every wayfinding label."""
+    return (
+        f"font-family:{_MONO};font-weight:400;font-size:{size}px;"
+        f"line-height:{lh};letter-spacing:{tracking};color:{color};"
+    )
+
+
+def _body(size: int = 15, color: str = INK, lh: str = "1.55") -> str:
+    return (
+        f"font-family:{_SANS};font-weight:400;font-size:{size}px;"
+        f"line-height:{lh};letter-spacing:-0.01em;color:{color};"
     )
 
 
@@ -62,87 +84,165 @@ def _fmt_time(t: str) -> str:
 
 
 def _fmt_date(d: str) -> str:
-    """'06/20/2026' -> 'Sat, Jun 20'. Falls back to the raw string."""
+    """'08/15/2026' -> 'SAT AUG 15'. Falls back to the raw string."""
     try:
-        return datetime.strptime(d, "%m/%d/%Y").strftime("%a, %b %d")
+        return datetime.strptime(d, "%m/%d/%Y").strftime("%a %b %d").upper()
     except (ValueError, TypeError):
         return d
 
 
-def _join_labels(labels: list[str]) -> str:
-    """'a', 'a and b', 'a, b and c'."""
-    if len(labels) == 1:
-        return labels[0]
-    return f"{', '.join(labels[:-1])} and {labels[-1]}"
-
-
-def _pill(href: str, label: str, *, bg: str, color: str, border: str | None = None,
-          radius: int = 96, size: int = 16, pad: str = "12px 22px") -> str:
-    """A sticker-label pill button."""
-    border_css = f"border:1px solid {border};" if border else "border:0;"
-    return (
-        f'<a href="{href}" style="display:inline-block;background:{bg};{border_css}'
-        f'{_text(size, color, "-0.04em")}text-decoration:none;padding:{pad};'
-        f'border-radius:{radius}px;">{label}</a>'
-    )
-
-
-def _tag(label: str, *, bg: str) -> str:
-    return (
-        f'<span style="display:inline-block;background:{bg};'
-        f'{_text(12, INK, "-0.96px")}padding:5px 12px;border-radius:5px;">{label}</span>'
-    )
-
-
-_HEADER = f"""
-<tr><td style="background:{CHARCOAL};border-radius:5px;padding:22px 26px;">
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
-    <td style="vertical-align:middle;">
-      <span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:{SUN};vertical-align:middle;margin-right:10px;"></span>
-      <span style="{_text(22, WHITE, '-0.88px', display=True)}vertical-align:middle;text-transform:uppercase;">ATX Tee Times</span>
-    </td>
-    <td style="text-align:right;vertical-align:middle;">
-      <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:{PINK};margin-left:5px;"></span>
-      <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:{LIME};margin-left:5px;"></span>
-      <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:{PERIWINKLE};margin-left:5px;"></span>
-    </td>
-  </tr></table>
-</td></tr>
-<tr><td style="height:16px;line-height:16px;font-size:16px;">&nbsp;</td></tr>
-"""
-
-
-def _spacer(h: int = 16) -> str:
+def _spacer(h: int) -> str:
+    """Vertical gap as a table row, for use between the shell's top-level rows."""
     return f'<tr><td style="height:{h}px;line-height:{h}px;font-size:{h}px;">&nbsp;</td></tr>'
 
 
+def _spacer_block(h: int) -> str:
+    """Vertical gap as a block element, for use inside a card's content flow."""
+    return f'<div style="height:{h}px;line-height:{h}px;font-size:{h}px;">&nbsp;</div>'
+
+
+def _rule(color: str = HAIRLINE) -> str:
+    """A 1px hairline. Borders and whitespace do all the separating; no shadows."""
+    return (
+        f'<tr><td style="border-top:1px solid {color};font-size:0;line-height:0;">'
+        f'&nbsp;</td></tr>'
+    )
+
+
+def _eyebrow(text: str, color: str = GRAPHITE) -> str:
+    """Tracked uppercase mono label sitting above a display line."""
+    return f'<div style="{_mono(11, color, lh="1.3")}text-transform:uppercase;">{text}</div>'
+
+
+def _flare_pill(href: str, label: str) -> str:
+    """The single rounded element in the system, and the only use of red."""
+    return (
+        f'<a href="{href}" style="display:inline-block;background:{FLARE};'
+        f'border:1px solid {FLARE};{_mono(12, WHITE, lh="1")}text-transform:uppercase;'
+        f'text-decoration:none;padding:15px 26px;border-radius:35px;'
+        f'mso-padding-alt:15px 26px;">{label}</a>'
+    )
+
+
+def _ghost_link(href: str, label: str) -> str:
+    """Square, hairline-bordered secondary action. Never competes with the pill."""
+    return (
+        f'<a href="{href}" style="display:inline-block;background:transparent;'
+        f'border:1px solid {INK};{_mono(11, INK, lh="1")}text-transform:uppercase;'
+        f'text-decoration:none;padding:9px 14px;mso-padding-alt:9px 14px;">{label}</a>'
+    )
+
+
+_MASTHEAD = f"""
+<tr><td style="padding:0 2px 14px;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+    <td style="vertical-align:middle;">
+      <span style="display:inline-block;width:9px;height:9px;background:{FLARE};vertical-align:middle;margin-right:9px;"></span><span style="{_mono(11, INK)}text-transform:uppercase;vertical-align:middle;">ATX Tee Times</span>
+    </td>
+    <td style="text-align:right;vertical-align:middle;">
+      <span style="{_mono(11, GRAPHITE)}text-transform:uppercase;">Dispatch</span>
+    </td>
+  </tr></table>
+</td></tr>
+<tr><td style="border-top:1px solid {INK};font-size:0;line-height:0;">&nbsp;</td></tr>
+"""
+
+
 def _shell(preheader: str, inner: str, footer_note: str) -> str:
-    """Wrap card content in the warm-linen page with header band and footer."""
+    """Bone canvas, hairline masthead, one square parchment card.
+
+    The layout is fluid up to 600px rather than fixed at it, so the oversized
+    display type still fits a 320px viewport. The media query is a refinement
+    for clients that honour <style>; the inline styles alone remain legible
+    everywhere else.
+    """
     return f"""\
 <!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="light only">
+<meta name="supported-color-schemes" content="light">
+<style>
+  @media only screen and (max-width:620px) {{
+    .dispatch-card {{ padding:24px 18px !important; }}
+    .dispatch-count {{ font-size:60px !important; }}
+    .dispatch-time {{ font-size:34px !important; }}
+    .dispatch-headline {{ font-size:34px !important; }}
+    .dispatch-slot {{ font-size:20px !important; }}
+  }}
+</style>
 </head>
-<body style="margin:0;padding:0;background:{LINEN};">
-<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:{LINEN};">{preheader}</div>
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:{LINEN};">
-  <tr><td align="center" style="padding:24px 12px;">
-    <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:600px;">
-      {_HEADER}
-      <tr><td style="background:{PAPER};border:1px solid {INK};border-radius:5px;padding:28px;">
+<body style="margin:0;padding:0;background:{CANVAS};">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:{CANVAS};">{preheader}</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:{CANVAS};">
+  <tr><td align="center" style="padding:28px 12px 32px;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;max-width:600px;">
+      {_MASTHEAD}
+      {_spacer(18)}
+      <tr><td class="dispatch-card" style="background:{PAPER};border:1px solid {INK};padding:34px 32px;">
         {inner}
       </td></tr>
       {_spacer(16)}
-      <tr><td style="padding:0 6px;">
-        <p style="{_text(12, FOG, '-0.6px', lh='1.6')}margin:0;">{footer_note}</p>
+      <tr><td style="padding:0 2px;">
+        <p style="{_mono(10, GRAPHITE, lh='1.7')}margin:0;">{footer_note}</p>
       </td></tr>
-      {_spacer(8)}
     </table>
   </td></tr>
 </table>
 </body></html>"""
+
+
+def _sheet(shown, attribute: bool) -> str:
+    """The departure board: tee times grouped under a date, one row each.
+
+    Grouping lifts the date out of every row, which matters most in the large
+    digests where the same string would otherwise repeat twenty times over.
+    `attribute` adds the originating watch to each row, which only earns its
+    space when one email spans several watches.
+    """
+    groups: dict[str, list] = {}
+    for s in shown:
+        groups.setdefault(s.date, []).append(s)
+
+    parts = [f"""
+    <tr>
+      <td style="padding:0 0 9px;{_mono(10, GRAPHITE)}text-transform:uppercase;">Tee sheet</td>
+      <td style="padding:0 0 9px;{_mono(10, GRAPHITE)}text-transform:uppercase;text-align:right;">Book</td>
+    </tr>
+    <tr><td colspan="2" style="border-top:1px solid {INK};font-size:0;line-height:0;">&nbsp;</td></tr>
+    """]
+
+    seen = 0
+    for date, rows in groups.items():
+        parts.append(
+            f'<tr><td colspan="2" style="padding:13px 0 3px;{_mono(10, INK)}'
+            f'text-transform:uppercase;">{_fmt_date(date)}</td></tr>'
+        )
+        for s in rows:
+            seen += 1
+            meta = f"{s.open_slots} open"
+            if attribute and s.watch is not None:
+                meta += f" &nbsp;/&nbsp; {esc(s.watch.label)}"
+            # The final rule would otherwise dangle just above the CTA.
+            border = "" if seen == len(shown) else f"border-bottom:1px solid {HAIRLINE};"
+            parts.append(f"""
+            <tr>
+              <td style="padding:12px 0 14px;{border}">
+                <div class="dispatch-slot" style="{_mono(23, INK, tracking='0.01em', lh='1.1')}">{_fmt_time(s.time)}</div>
+                <div style="{_body(15)}padding-top:6px;">{esc(s.course_name)}</div>
+                <div style="{_mono(10, GRAPHITE)}text-transform:uppercase;padding-top:5px;">{meta}</div>
+              </td>
+              <td style="padding:12px 0 14px 12px;{border}text-align:right;vertical-align:middle;white-space:nowrap;">
+                {_ghost_link(s.booking_url, "Book")}
+              </td>
+            </tr>
+            """)
+
+    return (
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0">'
+        f'{"".join(parts)}</table>'
+    )
 
 
 class EmailService:
@@ -156,6 +256,9 @@ class EmailService:
         and `watches` are the watches that produced them -- a user with several
         overlapping watches gets one email, not one per watch. Only call this
         with slots that haven't been alerted yet so we never resend the same email.
+
+        A single opening gets a different hero to a batch: the tee time itself
+        becomes the headline, because that is the only fact the reader needs.
         """
         if not settings.resend_api_key:
             logger.warning("RESEND_API_KEY not set; skipping digest to %s", to_email)
@@ -165,22 +268,8 @@ class EmailService:
         try:
             count = len(slots)
             time_word = "tee time" if count == 1 else "tee times"
-            single = watches[0] if len(watches) == 1 else None
+            single_watch = watches[0] if len(watches) == 1 else None
             labels = [esc(w.label) for w in watches]
-
-            if single is not None:
-                players_word = "player" if single.num_players == 1 else "players"
-                heading_tag = labels[0]
-                subtitle = (f"Matching your watch &mdash; {single.num_players} "
-                            f"{players_word}, {single.num_holes} holes.")
-                # Subject is plain text; the preheader is rendered into the body.
-                subject = f"{count} {time_word} opened: {single.label}"
-                preheader = f"{count} {time_word} just opened for {labels[0]}"
-            else:
-                heading_tag = f"{len(watches)} watches"
-                subtitle = f"Matching {_join_labels(labels)}."
-                subject = f"{count} {time_word} opened across {len(watches)} watches"
-                preheader = f"{count} {time_word} just opened across your watches"
 
             # Cap the rows so a mass re-detection can't render a wall of slots.
             # Every slot is still marked notified by the caller, so the overflow
@@ -188,53 +277,58 @@ class EmailService:
             shown = slots[: max(1, settings.max_slots_per_email)]
             overflow = count - len(shown)
 
-            row_html = []
-            for i, s in enumerate(shown):
-                last = i == len(shown) - 1
-                border = "" if last else f"border-bottom:1px solid {HAIRLINE};"
-                # With one watch the label is already in the header, so only
-                # attribute each row when several watches share the email.
-                origin = ""
-                if single is None and s.watch is not None:
-                    origin = f" &nbsp;&middot;&nbsp; {esc(s.watch.label)}"
-                row_html.append(f"""
-                <tr>
-                  <td style="padding:14px 0;{border}">
-                    <div style="{_text(16, INK, '-0.7px')}">{esc(s.course_name)}</div>
-                    <div style="{_text(12, FOG, '-0.5px')}padding-top:4px;">{_fmt_date(s.date)} &nbsp;&middot;&nbsp; {s.open_slots} open{origin}</div>
-                  </td>
-                  <td style="padding:14px 8px;{border}text-align:center;white-space:nowrap;">
-                    <span style="display:inline-block;background:{SUN};{_text(14, INK, '-0.4px')}padding:6px 13px;border-radius:96px;">{_fmt_time(s.time)}</span>
-                  </td>
-                  <td style="padding:14px 0 14px 8px;{border}text-align:right;white-space:nowrap;">
-                    {_pill(s.booking_url, "Book", bg=WHITE, color=INK, border=INK, size=14, pad="7px 16px")}
-                  </td>
-                </tr>
-                """)
+            if single_watch is not None:
+                scope = labels[0]
+                subject_tail = f": {single_watch.label}"
+            else:
+                scope = f"{len(watches)} watches"
+                subject_tail = f" across {len(watches)} watches"
+
+            if count == 1:
+                # One opening: lead with the tee time, not with a count.
+                s = slots[0]
+                hero = f"""
+                {_eyebrow(f"{_fmt_date(s.date)} &nbsp;/&nbsp; {esc(s.course_name).upper()}")}
+                <div class="dispatch-time" style="{_mono(44, INK, tracking='-0.01em', lh='1.05')}padding:14px 0 0;">{_fmt_time(s.time)}</div>
+                <div style="{_mono(11, GRAPHITE)}text-transform:uppercase;padding-top:10px;">{s.open_slots} slots open &nbsp;/&nbsp; {scope}</div>
+                """
+                body = ""
+                cta_label = "Book this tee time"
+                cta_href = s.booking_url
+                subject = f"{_fmt_time(s.time)} opened at {s.course_name}"
+                preheader = f"{_fmt_time(s.time)} on {_fmt_date(s.date)} at {s.course_name}."
+            else:
+                hero = f"""
+                {_eyebrow(f"{count} openings &nbsp;/&nbsp; {scope}")}
+                <div class="dispatch-count" style="{_disp(78)}padding:12px 0 0;">{count}</div>
+                <div class="dispatch-headline" style="{_disp(30, tracking='-0.02em', lh='1.1')}padding-top:6px;">{time_word} opened up</div>
+                """
+                body = f"""
+                {_spacer_block(26)}
+                {_sheet(shown, attribute=single_watch is None)}
+                {f'<p style="{_mono(11, GRAPHITE)}text-transform:uppercase;margin:16px 0 0;">+ {overflow} more &mdash; open WebTrac to see them all</p>' if overflow else ''}
+                """
+                cta_label = "Open WebTrac to book"
+                cta_href = SEARCH_URL
+                subject = f"{count} {time_word} opened{subject_tail}"
+                preheader = f"{count} {time_word} just opened. Tee times go fast."
 
             inner = f"""
-            {_tag(heading_tag, bg=SPRING)}
-            <h1 style="{_text(30, INK, '-1.02px', lh='1.05')}margin:16px 0 6px;">{count} {time_word} opened up</h1>
-            <p style="{_text(16, FOG, '-0.7px')}margin:0 0 20px;">
-              {subtitle}
-            </p>
-            <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
-              {''.join(row_html)}
-            </table>
-            {f'<p style="{_text(14, INK, "-0.6px")}margin:14px 0 0;">+ {overflow} more open {"slot" if overflow == 1 else "slots"} &mdash; open WebTrac to see them all.</p>' if overflow else ''}
-            <div style="padding-top:24px;">
-              {_pill(SEARCH_URL, "Open WebTrac to book &rarr;", bg=SUN, color=INK, radius=160, pad="15px 26px")}
+            {hero}
+            {body}
+            <div style="padding-top:30px;">
+              {_flare_pill(cta_href, cta_label)}
             </div>
-            <p style="{_text(12, FOG, '-0.5px', lh='1.6')}margin:16px 0 0;">
-              Tee times go fast &mdash; book quickly.
-            </p>
+            <div style="{_mono(10, GRAPHITE, lh='1.7')}text-transform:uppercase;padding-top:16px;">
+              Tee times go fast &mdash; book quickly
+            </div>
             """
             html = _shell(
                 preheader=preheader,
                 inner=inner,
                 footer_note=(
-                    "You're receiving this because you set up a watch on ATX Tee "
-                    "Times Watcher. We only email when new times open, not on every scan."
+                    "You're receiving this because you set up a watch on ATX Tee Times. "
+                    "We only email when new times open, not on every scan."
                 ),
             )
             params = {
@@ -258,27 +352,33 @@ class EmailService:
             return False
         try:
             app_url = f"{settings.base_url.rstrip('/')}/watches"
-            search_url = build_search_url()  # generic Golf search, prefilled module
             inner = f"""
-            {_tag("Weekly setup", bg=SAND)}
-            <h1 style="{_text(30, INK, '-1.02px', lh='1.05')}margin:16px 0 6px;">Set up your tee-time watches</h1>
-            <p style="{_text(18, INK, '-0.8px', lh='1.35')}margin:0 0 8px;">Hi {esc(user_name)}, the weekly scan starts this morning.</p>
-            <p style="{_text(16, FOG, '-0.7px', lh='1.45')}margin:0 0 22px;">
-              Make sure your watches are configured so we can alert you the moment a
-              matching tee time opens up this week. We scan every 5 minutes, Tuesday
-              through Sunday.
+            {_eyebrow("Weekly setup &nbsp;/&nbsp; scan opens today")}
+            <div class="dispatch-headline" style="{_disp(46, tracking='-0.035em', lh='0.98')}padding:14px 0 0;">Set up your<br>tee-time watches</div>
+            <p style="{_body(16)}margin:20px 0 0;">
+              Hi {esc(user_name)}, the weekly scan starts this morning. Make sure your
+              watches are configured so we can alert you the moment a matching tee
+              time opens up.
             </p>
-            <div>
-              {_pill(app_url, "Review my watches", bg=SUN, color=INK, radius=160, pad="15px 26px")}
+            {_spacer_block(24)}
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+              <tr><td style="border-top:1px solid {INK};font-size:0;line-height:0;">&nbsp;</td></tr>
+              <tr><td style="padding:14px 0;{_mono(11, GRAPHITE)}text-transform:uppercase;">
+                Scan interval &nbsp;/&nbsp; every 5 minutes<br>
+                Coverage &nbsp;/&nbsp; Tuesday through Sunday
+              </td></tr>
+            </table>
+            <div style="padding-top:22px;">
+              {_flare_pill(app_url, "Review my watches")}
             </div>
-            <p style="{_text(12, FOG, '-0.5px', lh='1.6')}margin:18px 0 0;">
-              Prefer to browse first? {_pill(search_url, "Open the Austin WebTrac golf search", bg=WHITE, color=INK, border=INK, size=12, pad="6px 14px")}
-            </p>
+            <div style="padding-top:18px;">
+              {_ghost_link(build_search_url(), "Browse WebTrac first")}
+            </div>
             """
             html = _shell(
                 preheader="The weekly tee-time scan starts this morning.",
                 inner=inner,
-                footer_note="You're receiving this because you have an ATX Tee Times Watcher account.",
+                footer_note="You're receiving this because you have an ATX Tee Times account.",
             )
             params = {
                 "from": settings.email_from,
@@ -293,7 +393,6 @@ class EmailService:
             logger.error("Failed to send setup reminder to %s: %s", to_email, e)
             return False
 
-
     @classmethod
     def send_scraper_blocked_email(cls, to_email: str, user_name: str,
                                    blocked_for, reason: str) -> bool:
@@ -306,25 +405,28 @@ class EmailService:
             minutes = int((blocked_for.total_seconds() % 3600) // 60)
             duration = f"{hours}h {minutes}m" if hours else f"{minutes}m"
             inner = f"""
-            {_tag("Scanner offline", bg=BUBBLEGUM)}
-            <h1 style="{_text(30, INK, '-1.02px', lh='1.05')}margin:16px 0 6px;">Tee-time scanning is blocked</h1>
-            <p style="{_text(18, INK, '-0.8px', lh='1.35')}margin:0 0 8px;">
-              Hi {esc(user_name)}, the Austin WebTrac site has been refusing our requests for {duration}.
+            {_eyebrow("Scanner offline", FLARE)}
+            <div class="dispatch-headline" style="{_disp(46, tracking='-0.035em', lh='0.98')}padding:14px 0 0;">Scanning is<br>blocked</div>
+            <p style="{_body(16)}margin:20px 0 0;">
+              Hi {esc(user_name)}, the Austin WebTrac site has been refusing our
+              requests for {duration}. Until this clears no tee times can be detected,
+              so you will not receive alerts even if times open up. Your watches are
+              unchanged and resume automatically once access is restored.
             </p>
-            <p style="{_text(16, FOG, '-0.7px', lh='1.45')}margin:0 0 20px;">
-              Until this clears, no tee times can be detected and you will not receive
-              alerts &mdash; even if times open up. Your watches are unchanged and will
-              resume automatically once access is restored.
-            </p>
-            <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
-                   style="background:{SAND};border-radius:5px;">
-              <tr><td style="padding:16px 18px;">
-                <div style="{_text(12, FOG, '-0.5px')}">Reason reported</div>
-                <div style="{_text(16, INK, '-0.7px')}padding-top:5px;">{esc(reason) or "blocked by site"}</div>
+            {_spacer_block(24)}
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+              <tr><td style="border-top:1px solid {INK};font-size:0;line-height:0;">&nbsp;</td></tr>
+              <tr><td style="padding:14px 0;">
+                <div style="{_mono(10, GRAPHITE)}text-transform:uppercase;">Duration</div>
+                <div style="{_mono(20, INK, tracking='0.01em')}padding-top:4px;">{duration}</div>
+              </td></tr>
+              <tr><td style="border-top:1px solid {HAIRLINE};padding:14px 0;">
+                <div style="{_mono(10, GRAPHITE)}text-transform:uppercase;">Reason reported</div>
+                <div style="{_body(15)}padding-top:4px;">{esc(reason) or "blocked by site"}</div>
               </td></tr>
             </table>
-            <div style="padding-top:24px;">
-              {_pill(SEARCH_URL, "Check WebTrac manually &rarr;", bg=SUN, color=INK, radius=160, pad="15px 26px")}
+            <div style="padding-top:22px;">
+              {_flare_pill(SEARCH_URL, "Check WebTrac manually")}
             </div>
             """
             html = _shell(
@@ -332,8 +434,8 @@ class EmailService:
                 inner=inner,
                 footer_note=(
                     "You're receiving this because you have an active watch. We send this "
-                    "at most once every "
-                    f"{settings.blocked_alert_cooldown_hours} hours while scanning is down."
+                    f"at most once every {settings.blocked_alert_cooldown_hours} hours "
+                    "while scanning is down."
                 ),
             )
             params = {
