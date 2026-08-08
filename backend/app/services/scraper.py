@@ -40,6 +40,66 @@ COURSES = {
 _CSRF_RE = re.compile(r'name="_csrf_token"[^>]*value="([^"]+)"')
 _PROXY_PORT_RE = re.compile(r":(\d+)$")
 
+_TRANSPORT_ERRORS: tuple[type[BaseException], ...] | None = None
+
+
+def _transport_errors() -> tuple[type[BaseException], ...]:
+    """curl_cffi failures meaning "this exit is bad", as opposed to "we're banned".
+
+    Resolved lazily because curl_cffi is only imported on first use. Deliberately
+    narrower than RequestException so genuine bugs (bad URL, closed session)
+    still surface instead of being retried against ten different IPs.
+    """
+    global _TRANSPORT_ERRORS
+    if _TRANSPORT_ERRORS is None:
+        from curl_cffi.requests import exceptions as cffi_exc
+        _TRANSPORT_ERRORS = (
+            cffi_exc.Timeout,
+            cffi_exc.ConnectionError,
+            cffi_exc.ProxyError,
+            cffi_exc.DNSError,
+            cffi_exc.SSLError,
+        )
+    return _TRANSPORT_ERRORS
+
+
+class _Traffic:
+    """Counts the wire bytes a metered proxy actually bills us for.
+
+    `len(response.content)` is the *decompressed* body and overstates the real
+    figure roughly threefold, so this sums curl's own request/response sizes.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.requests = 0
+        self.bytes = 0
+
+    def record(self, response) -> None:
+        wire = sum(
+            getattr(response, attr, 0) or 0
+            for attr in ("request_size", "upload_size", "header_size", "download_size")
+        )
+        with self._lock:
+            self.requests += 1
+            self.bytes += wire
+
+    def snapshot(self) -> tuple[int, int]:
+        with self._lock:
+            return self.requests, self.bytes
+
+    def status(self) -> dict:
+        requests, wire = self.snapshot()
+        return {
+            "requests": requests,
+            "bytes": wire,
+            "megabytes": round(wire / 1_048_576, 3),
+        }
+
+
+# Process-wide, since billing is per-egress not per-instance.
+traffic = _Traffic()
+
 
 @dataclass
 class Slot:
@@ -343,6 +403,7 @@ class TeeTimeScraper:
             return self._token
         session = self._ensure_session()
         boot = session.get(BOOTSTRAP_URL, timeout=_TIMEOUT)
+        traffic.record(boot)
         if boot.status_code != 200 or "Attention Required" in boot.text:
             raise CloudflareBlocked(f"bootstrap status {boot.status_code}")
         token = _extract_csrf(boot.text)
@@ -369,21 +430,47 @@ class TeeTimeScraper:
 
         # About half of residential exit IPs are already WAF-blocked, so treat a
         # block as "bad IP" and hop sticky ports rather than failing the scan.
-        attempts = settings.proxy_max_ip_attempts if settings.scraper_proxy else 1
-        last_error: CloudflareBlocked | None = None
-        for attempt in range(1, attempts + 1):
+        # Timeouts get a separate, much smaller budget: they mean the exit is
+        # slow or dead rather than banned, and each one burns the full read
+        # timeout, so retrying ten of them would blow the scan budget.
+        using_proxy = bool(settings.scraper_proxy)
+        block_attempts = settings.proxy_max_ip_attempts if using_proxy else 1
+        timeout_attempts = settings.proxy_max_timeout_attempts if using_proxy else 1
+        blocks = 0
+        timeouts = 0
+        last_block: CloudflareBlocked | None = None
+
+        while True:
             try:
                 slots = self._fetch_curl(begindate, holes, course_id)
             except CloudflareBlocked as e:
-                last_error = e
-                if attempt < attempts:
-                    logger.debug("Exit IP blocked (%s); rotating (attempt %d/%d).",
-                                 e, attempt, attempts)
-                    self._rotate_ip()
-                    continue
-                break
-            if attempt > 1:
-                logger.info("Found a working exit IP after %d attempt(s).", attempt)
+                blocks += 1
+                last_block = e
+                if blocks >= block_attempts:
+                    break
+                logger.debug("Exit IP blocked (%s); rotating (block %d/%d).",
+                             e, blocks, block_attempts)
+                self._rotate_ip()
+                continue
+            except _transport_errors() as e:
+                # Never trips the breaker: an unreachable exit says nothing about
+                # whether the site is banning us. But we must still abandon the
+                # IP, or every remaining fetch this cycle stalls behind it.
+                timeouts += 1
+                self._rotate_ip()
+                if timeouts >= timeout_attempts:
+                    logger.warning(
+                        "Exit IP unreachable %dx for %s (%s); rotated away, skipping "
+                        "this fetch until the next cycle.", timeouts, begindate, e,
+                    )
+                    raise
+                logger.info("Exit IP unreachable (%s); rotating and retrying %s.", e, begindate)
+                continue
+            if blocks or timeouts:
+                logger.info(
+                    "Found a working exit IP for %s after %d block(s) and %d timeout(s).",
+                    begindate, blocks, timeouts,
+                )
             circuit.record_success()
             return slots
 
@@ -391,24 +478,24 @@ class TeeTimeScraper:
         # otherwise trip the breaker so we stop hammering.
         self.reset()
         if not settings.use_playwright_fallback:
-            circuit.record_block(str(last_error))
+            circuit.record_block(str(last_block))
             logger.error(
                 "Blocked on %d exit IP(s) (%s). If SCRAPER_PROXY is unset, the host's own "
                 "IP is banned - set a residential/ISP proxy. See DEPLOY.md.",
-                attempts, last_error,
+                blocks, last_block,
             )
-            raise last_error
+            raise last_block
         logger.warning("curl_cffi blocked; trying Playwright fallback for %s", begindate)
         try:
             slots = self._fetch_playwright(begindate, holes, course_id)
         except ImportError as imp:
-            circuit.record_block(str(last_error))
+            circuit.record_block(str(last_block))
             raise RuntimeError(
                 "USE_PLAYWRIGHT_FALLBACK is on but playwright is not installed. "
                 "Add playwright to requirements and run `playwright install chromium`."
             ) from imp
         except Exception:
-            circuit.record_block(str(last_error))
+            circuit.record_block(str(last_block))
             raise
         circuit.record_success()
         return slots
@@ -418,11 +505,13 @@ class TeeTimeScraper:
         token = self._ensure_token()
         url = _search_url(token, begindate, holes=holes, course_id=course_id)
         r = session.get(url, headers={"referer": BOOTSTRAP_URL}, timeout=_TIMEOUT)
+        traffic.record(r)
         if r.status_code != 200 or "Attention Required" in r.text:
             # Token may be stale/expired; refresh once and retry.
             token = self._ensure_token(force=True)
             url = _search_url(token, begindate, holes=holes, course_id=course_id)
             r = session.get(url, headers={"referer": BOOTSTRAP_URL}, timeout=_TIMEOUT)
+            traffic.record(r)
             if r.status_code != 200 or "Attention Required" in r.text:
                 raise CloudflareBlocked(f"search status {r.status_code}")
         return parse_results(r.text)

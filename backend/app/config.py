@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     proxy_port_min: int = 10000
     proxy_port_max: int = 19999
     proxy_max_ip_attempts: int = 10
+    # Separate, much smaller budget for unreachable exits. A timeout costs the
+    # full read timeout in wall clock (a block fails instantly), so retrying as
+    # many times as we retry blocks would exhaust the scan budget. We still
+    # rotate away from the dead IP on the very first timeout.
+    proxy_max_timeout_attempts: int = 3
     # Circuit breaker: only after every IP attempt fails does scanning back off.
     # With a working proxy this should effectively never trigger.
     block_backoff_start_minutes: int = 5

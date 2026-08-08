@@ -35,6 +35,37 @@ function formatTime(t: string): string {
 
 const shortCourse = (name: string) => name.replace(' Golf Course', '')
 
+const toMinutes = (t: string): number => {
+  const [h, m] = t.split(':').map(Number)
+  return h * 60 + m
+}
+
+const courseSet = (csv: string, all: Course[]): Set<number> =>
+  csv === 'all'
+    ? new Set(all.map((c) => c.id))
+    : new Set(csv.split(',').filter(Boolean).map(Number))
+
+/**
+ * Whether two watches can match the same tee time.
+ *
+ * Player count is deliberately ignored: a slot with four openings satisfies a
+ * 2-player and a 4-player watch alike, so it still counts as an overlap.
+ */
+function watchesOverlap(draft: WatchInput, existing: Watch, all: Course[]): boolean {
+  if (draft.num_holes !== existing.num_holes) return false
+
+  const draftDays = new Set(draft.target_days.split(',').filter(Boolean))
+  if (!existing.target_days.split(',').some((d) => draftDays.has(d))) return false
+
+  const draftCourses = courseSet(draft.course_ids, all)
+  if (![...courseSet(existing.course_ids, all)].some((id) => draftCourses.has(id))) return false
+
+  return (
+    toMinutes(draft.window_start) <= toMinutes(existing.window_end) &&
+    toMinutes(existing.window_start) <= toMinutes(draft.window_end)
+  )
+}
+
 export default function Watches() {
   const navigate = useNavigate()
   const [watches, setWatches] = useState<Watch[]>([])
@@ -96,6 +127,14 @@ export default function Watches() {
           : [...selectedCourses].map((id) => shortCourse(courses.find((c) => c.id === id)?.name || `${id}`)).join(', ')
     return `Find ${players} for ${form.num_holes} holes at ${courseText} on ${days} between ${formatTime(form.window_start)} and ${formatTime(form.window_end)}.`
   }, [form, selectedDays, courseMode, selectedCourses, courses])
+
+  const overlapping = useMemo(() => {
+    const courseIds =
+      courseMode === 'all' ? 'all' : [...selectedCourses].sort((a, b) => a - b).join(',')
+    if (!form.target_days || (courseMode === 'specific' && selectedCourses.size === 0)) return []
+    const draft: WatchInput = { ...form, course_ids: courseIds }
+    return watches.filter((w) => w.active && watchesOverlap(draft, w, courses))
+  }, [form, courseMode, selectedCourses, watches, courses])
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -274,6 +313,22 @@ export default function Watches() {
           <span className="text-[10px] uppercase tracking-[0.16em] text-zinc-600 block mb-1">Summary</span>
           {summary}
         </div>
+
+        {overlapping.length > 0 && (
+          <div className="border-2 border-black bg-amber-100 p-3 text-sm" role="status">
+            <span className="text-[10px] uppercase tracking-[0.16em] text-zinc-700 block mb-1">
+              Overlaps an existing watch
+            </span>
+            This matches the same tee times as{' '}
+            <span className="font-bold">
+              {overlapping.map((w) => w.label).join(', ')}
+            </span>
+            . You'll still get a single email per opening, but the same slot will be
+            listed once per watch in your notifications. Widening{' '}
+            {overlapping.length === 1 ? 'that watch' : 'one of those watches'} instead
+            usually keeps things cleaner.
+          </div>
+        )}
 
         <button className="button" type="submit" disabled={submitting}>
           {submitting ? 'Creating...' : 'Create watch'}

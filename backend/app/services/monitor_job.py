@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Optional
 
@@ -13,7 +14,7 @@ from ..config import get_settings
 from ..db import SessionLocal
 from ..models import FoundSlot, User, Watch
 from .email import get_email_service
-from .scraper import COURSES, CloudflareBlocked, Slot, circuit, get_scraper
+from .scraper import COURSES, CloudflareBlocked, Slot, circuit, get_scraper, traffic
 
 ALL_COURSE_IDS = sorted(COURSES.keys())
 
@@ -43,6 +44,7 @@ _unbookable_until: dict[str, datetime] = {}
 _last_scan: dict = {
     "at": None, "ran": False, "in_window": False, "message": "No scan yet.",
     "dates_scanned": [], "total_slots": 0, "new_matches": 0, "scoped": False,
+    "duration_seconds": None, "requests": 0, "bytes": 0,
 }
 
 
@@ -192,64 +194,115 @@ def _collect_pending(db, watch: Watch, matches: list[Slot]) -> int:
     return new_count
 
 
-def _send_digest(db, email, watch: Watch, pending: list[FoundSlot]) -> bool:
-    """Send a single digest email for all pending slots on a watch.
+def _dedupe_slots(pending: list[FoundSlot]) -> tuple[list[FoundSlot], list[FoundSlot]]:
+    """Split pending rows into the ones to show and the duplicates to suppress.
+
+    Two overlapping watches each record their own row for the same tee time,
+    which previously sent the user one near-identical email per watch. The
+    duplicates are returned so the caller can still mark them notified; leaving
+    them pending would just re-send them on the next cycle.
+    """
+    seen: set[tuple[int, str, str]] = set()
+    unique: list[FoundSlot] = []
+    duplicates: list[FoundSlot] = []
+    for slot in pending:
+        key = (slot.course_id, slot.date, slot.time)
+        if key in seen:
+            duplicates.append(slot)
+        else:
+            seen.add(key)
+            unique.append(slot)
+    return unique, duplicates
+
+
+def _contributing_watches(watches: list[Watch], slots: list[FoundSlot]) -> list[Watch]:
+    """The watches that actually produced `slots`, in first-seen order."""
+    by_id = {w.id: w for w in watches}
+    out: list[Watch] = []
+    for slot in slots:
+        watch = by_id.get(slot.watch_id)
+        if watch is not None and watch not in out:
+            out.append(watch)
+    return out
+
+
+def _send_digest(db, email, watches: list[Watch], slots: list[FoundSlot],
+                 duplicates: list[FoundSlot]) -> bool:
+    """Send one digest email covering every pending slot for a single user.
 
     Marks rows notified only if the email actually goes out, so a failed send is
     retried in a later digest rather than lost.
     """
-    if not pending:
+    if not slots:
         return False
-    for r in pending:
+    for r in slots + duplicates:
         db.refresh(r)
-    pending.sort(key=lambda r: (r.date, _to_minutes(r.time) or 0))
+    slots.sort(key=lambda r: (r.date, _to_minutes(r.time) or 0))
+    user = watches[0].user
     sent = email.send_slots_digest_email(
-        to_email=watch.user.email, user_name=watch.user.name, watch=watch, slots=pending,
+        to_email=user.email, user_name=user.name,
+        watches=_contributing_watches(watches, slots), slots=slots,
     )
     if sent:
-        for r in pending:
+        for r in slots + duplicates:
             r.notified = True
         db.commit()
-        logger.info("Digest sent for watch %s: %d slot(s)", watch.id, len(pending))
+        logger.info("Digest sent to %s: %d slot(s).", user.email, len(slots))
         return True
-    else:
-        logger.warning(
-            "Watch %s has %d pending slot(s) but email failed; will retry later.",
-            watch.id, len(pending),
-        )
-        return False
+    logger.warning(
+        "User %s has %d pending slot(s) but email failed; will retry later.",
+        user.email, len(slots),
+    )
+    return False
 
 
 def _send_pending_digests(db, email, watches: list[Watch], now: datetime,
                           force: bool = False) -> int:
-    """Retry fresh, unnotified slots for each active watch.
+    """Retry fresh, unnotified slots, sending at most one email per user.
 
-    Opportunity history remains visible in the dashboard, but email alert
-    candidates are intentionally stricter: no quiet-window emails and no stale
-    backlog emails after the retry freshness window has passed. A forced/manual
-    "Scan now" bypasses the quiet window so the user always gets the email.
+    Grouping by user rather than by watch is what keeps overlapping watches from
+    producing duplicate emails for the same tee time. Opportunity history remains
+    visible in the dashboard, but email alert candidates are intentionally
+    stricter: no quiet-window emails and no stale backlog emails after the retry
+    freshness window has passed. A forced/manual "Scan now" bypasses the quiet
+    window so the user always gets the email.
     """
     if not force and _in_alert_quiet_window(now):
         logger.info("Alert quiet window active; skipping pending digest emails.")
         return 0
 
-    sent_slots = 0
+    by_user: dict[int, list[Watch]] = defaultdict(list)
     for watch in watches:
+        by_user[watch.user_id].append(watch)
+
+    sent_slots = 0
+    for user_id, user_watches in by_user.items():
         pending = (
             db.query(FoundSlot)
-            .filter(FoundSlot.watch_id == watch.id, FoundSlot.notified.is_(False))
+            .filter(
+                FoundSlot.watch_id.in_([w.id for w in user_watches]),
+                FoundSlot.notified.is_(False),
+            )
             .all()
         )
         eligible = [slot for slot in pending if _is_fresh_alert_candidate(slot, now)]
-        skipped = len(pending) - len(eligible)
-        if skipped:
+        stale = len(pending) - len(eligible)
+        if stale:
             logger.info(
-                "Watch %s has %d stale pending slot(s); keeping visible but not emailing.",
-                watch.id,
-                skipped,
+                "User %s has %d stale pending slot(s); keeping visible but not emailing.",
+                user_id, stale,
             )
-        if _send_digest(db, email, watch, eligible):
-            sent_slots += len(eligible)
+        if not eligible:
+            continue
+
+        unique, duplicates = _dedupe_slots(eligible)
+        if duplicates:
+            logger.info(
+                "Collapsed %d duplicate slot(s) from overlapping watches for user %s.",
+                len(duplicates), user_id,
+            )
+        if _send_digest(db, email, user_watches, unique, duplicates):
+            sent_slots += len(unique)
     return sent_slots
 
 
@@ -305,6 +358,8 @@ def scan(force: bool = False, user_id: Optional[int] = None) -> dict:
             "message": "Outside scan window (Tue 06:00 - Sun 23:59 CT).",
         }
 
+    started = time.monotonic()
+    requests_before, bytes_before = traffic.snapshot()
     db = SessionLocal()
     email = get_email_service()
     new_matches = 0
@@ -419,6 +474,15 @@ def scan(force: bool = False, user_id: Optional[int] = None) -> dict:
         if blocked:
             _maybe_send_blocked_alert(db, email)
 
+        elapsed = time.monotonic() - started
+        requests_after, bytes_after = traffic.snapshot()
+        cycle_requests = requests_after - requests_before
+        cycle_bytes = bytes_after - bytes_before
+        logger.info(
+            "Scan traffic: %d request(s), %.1f KB this cycle; %.1f MB total since start.",
+            cycle_requests, cycle_bytes / 1024, bytes_after / 1_048_576,
+        )
+
         budget_note = " (scan budget hit; coverage partial)" if budget_hit else ""
         blocked_note = (
             f" BLOCKED: scraper is being refused by the site ({circuit.last_reason}); "
@@ -428,9 +492,13 @@ def scan(force: bool = False, user_id: Optional[int] = None) -> dict:
             "ran": True, "in_window": True, "dates_scanned": dates_scanned,
             "total_slots": total_slots, "new_matches": new_matches,
             "blocked": blocked,
+            "duration_seconds": round(elapsed, 1),
+            "requests": cycle_requests,
+            "bytes": cycle_bytes,
             "message": (
-                f"Scanned {len(dates_scanned)} date(s); {new_matches} new match(es); "
-                f"{pending_alerts_sent} pending alert(s) sent.{budget_note}{blocked_note}"
+                f"Scanned {len(dates_scanned)} date(s) in {elapsed:.0f}s; "
+                f"{new_matches} new match(es); {pending_alerts_sent} pending alert(s) sent."
+                f"{budget_note}{blocked_note}"
             ),
         }
     finally:

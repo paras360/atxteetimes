@@ -87,10 +87,26 @@ default 10) instead of failing the scan. At a ~45% per-IP success rate, the odds
 of all 10 failing are under 0.1%, so the circuit breaker should never fire while
 a proxy is configured.
 
+An exit IP that *times out* rather than returning 403 is rotated away just as
+eagerly, but with its own smaller budget (`PROXY_MAX_TIMEOUT_ATTEMPTS`, default
+3) because each timeout costs the full read timeout in wall clock rather than
+failing instantly. Timeouts never trip the circuit breaker: an unreachable exit
+says nothing about whether the site is banning us.
+
 A circuit breaker backs off exponentially (5 min up to 60 min) once blocked, so
 the app stops hammering the WAF - repeated retries are what entrench a ban. The
 current state is visible at `/api/scan-status` under `scraper`, and account
 owners get a warning email after `BLOCKED_ALERT_AFTER_MINUTES` (default 120).
+
+## Watching proxy spend
+`/api/scan-status` reports `traffic` with the cumulative request count and wire
+bytes since the process started, measured from curl's own counters rather than
+the decompressed body (which overstates it roughly threefold). Every scan also
+logs a line you can grep:
+
+```bash
+docker compose logs --since 24h app | grep "Scan traffic"
+```
 
 ## Optional: HTTPS + domain
 Point a domain's A record at the droplet, then put Caddy in front (automatic

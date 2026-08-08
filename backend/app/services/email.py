@@ -7,6 +7,7 @@ usual email-client CSS stripping.
 """
 import logging
 from datetime import datetime
+from html import escape as esc
 
 import resend
 
@@ -66,6 +67,13 @@ def _fmt_date(d: str) -> str:
         return datetime.strptime(d, "%m/%d/%Y").strftime("%a, %b %d")
     except (ValueError, TypeError):
         return d
+
+
+def _join_labels(labels: list[str]) -> str:
+    """'a', 'a and b', 'a, b and c'."""
+    if len(labels) == 1:
+        return labels[0]
+    return f"{', '.join(labels[:-1])} and {labels[-1]}"
 
 
 def _pill(href: str, label: str, *, bg: str, color: str, border: str | None = None,
@@ -141,21 +149,38 @@ class EmailService:
     """Send tee-time-found notifications."""
 
     @classmethod
-    def send_slots_digest_email(cls, to_email: str, user_name: str, watch, slots) -> bool:
-        """Send one digest listing every newly-opened slot for a watch.
+    def send_slots_digest_email(cls, to_email: str, user_name: str, watches, slots) -> bool:
+        """Send one digest listing every newly-opened slot for a user.
 
-        `slots` is a list of FoundSlot rows (already sorted). Only call this with
-        slots that haven't been alerted yet so we never resend the same email.
+        `slots` is a list of FoundSlot rows (already sorted and de-duplicated),
+        and `watches` are the watches that produced them -- a user with several
+        overlapping watches gets one email, not one per watch. Only call this
+        with slots that haven't been alerted yet so we never resend the same email.
         """
         if not settings.resend_api_key:
             logger.warning("RESEND_API_KEY not set; skipping digest to %s", to_email)
             return False
-        if not slots:
+        if not slots or not watches:
             return False
         try:
             count = len(slots)
             time_word = "tee time" if count == 1 else "tee times"
-            players_word = "player" if watch.num_players == 1 else "players"
+            single = watches[0] if len(watches) == 1 else None
+            labels = [esc(w.label) for w in watches]
+
+            if single is not None:
+                players_word = "player" if single.num_players == 1 else "players"
+                heading_tag = labels[0]
+                subtitle = (f"Matching your watch &mdash; {single.num_players} "
+                            f"{players_word}, {single.num_holes} holes.")
+                # Subject is plain text; the preheader is rendered into the body.
+                subject = f"{count} {time_word} opened: {single.label}"
+                preheader = f"{count} {time_word} just opened for {labels[0]}"
+            else:
+                heading_tag = f"{len(watches)} watches"
+                subtitle = f"Matching {_join_labels(labels)}."
+                subject = f"{count} {time_word} opened across {len(watches)} watches"
+                preheader = f"{count} {time_word} just opened across your watches"
 
             # Cap the rows so a mass re-detection can't render a wall of slots.
             # Every slot is still marked notified by the caller, so the overflow
@@ -167,11 +192,16 @@ class EmailService:
             for i, s in enumerate(shown):
                 last = i == len(shown) - 1
                 border = "" if last else f"border-bottom:1px solid {HAIRLINE};"
+                # With one watch the label is already in the header, so only
+                # attribute each row when several watches share the email.
+                origin = ""
+                if single is None and s.watch is not None:
+                    origin = f" &nbsp;&middot;&nbsp; {esc(s.watch.label)}"
                 row_html.append(f"""
                 <tr>
                   <td style="padding:14px 0;{border}">
-                    <div style="{_text(16, INK, '-0.7px')}">{s.course_name}</div>
-                    <div style="{_text(12, FOG, '-0.5px')}padding-top:4px;">{_fmt_date(s.date)} &nbsp;&middot;&nbsp; {s.open_slots} open</div>
+                    <div style="{_text(16, INK, '-0.7px')}">{esc(s.course_name)}</div>
+                    <div style="{_text(12, FOG, '-0.5px')}padding-top:4px;">{_fmt_date(s.date)} &nbsp;&middot;&nbsp; {s.open_slots} open{origin}</div>
                   </td>
                   <td style="padding:14px 8px;{border}text-align:center;white-space:nowrap;">
                     <span style="display:inline-block;background:{SUN};{_text(14, INK, '-0.4px')}padding:6px 13px;border-radius:96px;">{_fmt_time(s.time)}</span>
@@ -183,10 +213,10 @@ class EmailService:
                 """)
 
             inner = f"""
-            {_tag(watch.label, bg=SPRING)}
+            {_tag(heading_tag, bg=SPRING)}
             <h1 style="{_text(30, INK, '-1.02px', lh='1.05')}margin:16px 0 6px;">{count} {time_word} opened up</h1>
             <p style="{_text(16, FOG, '-0.7px')}margin:0 0 20px;">
-              Matching your watch &mdash; {watch.num_players} {players_word}, {watch.num_holes} holes.
+              {subtitle}
             </p>
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
               {''.join(row_html)}
@@ -200,7 +230,7 @@ class EmailService:
             </p>
             """
             html = _shell(
-                preheader=f"{count} {time_word} just opened for {watch.label}",
+                preheader=preheader,
                 inner=inner,
                 footer_note=(
                     "You're receiving this because you set up a watch on ATX Tee "
@@ -210,7 +240,7 @@ class EmailService:
             params = {
                 "from": settings.email_from,
                 "to": [to_email],
-                "subject": f"{count} {time_word} opened: {watch.label}",
+                "subject": subject,
                 "html": html,
             }
             result = resend.Emails.send(params)
@@ -232,7 +262,7 @@ class EmailService:
             inner = f"""
             {_tag("Weekly setup", bg=SAND)}
             <h1 style="{_text(30, INK, '-1.02px', lh='1.05')}margin:16px 0 6px;">Set up your tee-time watches</h1>
-            <p style="{_text(18, INK, '-0.8px', lh='1.35')}margin:0 0 8px;">Hi {user_name}, the weekly scan starts this morning.</p>
+            <p style="{_text(18, INK, '-0.8px', lh='1.35')}margin:0 0 8px;">Hi {esc(user_name)}, the weekly scan starts this morning.</p>
             <p style="{_text(16, FOG, '-0.7px', lh='1.45')}margin:0 0 22px;">
               Make sure your watches are configured so we can alert you the moment a
               matching tee time opens up this week. We scan every 5 minutes, Tuesday
@@ -279,7 +309,7 @@ class EmailService:
             {_tag("Scanner offline", bg=BUBBLEGUM)}
             <h1 style="{_text(30, INK, '-1.02px', lh='1.05')}margin:16px 0 6px;">Tee-time scanning is blocked</h1>
             <p style="{_text(18, INK, '-0.8px', lh='1.35')}margin:0 0 8px;">
-              Hi {user_name}, the Austin WebTrac site has been refusing our requests for {duration}.
+              Hi {esc(user_name)}, the Austin WebTrac site has been refusing our requests for {duration}.
             </p>
             <p style="{_text(16, FOG, '-0.7px', lh='1.45')}margin:0 0 20px;">
               Until this clears, no tee times can be detected and you will not receive
@@ -290,7 +320,7 @@ class EmailService:
                    style="background:{SAND};border-radius:5px;">
               <tr><td style="padding:16px 18px;">
                 <div style="{_text(12, FOG, '-0.5px')}">Reason reported</div>
-                <div style="{_text(16, INK, '-0.7px')}padding-top:5px;">{reason or "blocked by site"}</div>
+                <div style="{_text(16, INK, '-0.7px')}padding-top:5px;">{esc(reason) or "blocked by site"}</div>
               </td></tr>
             </table>
             <div style="padding-top:24px;">
