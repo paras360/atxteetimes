@@ -48,12 +48,17 @@ class Settings(BaseSettings):
     # is the only reliable egress from a cloud host.
     scraper_proxy: str = ""
     # Sticky-session port range. The provider binds one residential IP per port,
-    # so changing port is how we change exit IP. Roughly half of residential IPs
-    # are already WAF-blocked, so a blocked fetch hops ports rather than giving
-    # up -- far better than pausing scanning.
+    # so changing port is how we change exit IP. Most residential IPs are
+    # already WAF-blocked, so a blocked fetch hops ports rather than giving up
+    # -- far better than pausing scanning.
     proxy_port_min: int = 10000
     proxy_port_max: int = 19999
-    proxy_max_ip_attempts: int = 10
+    # Measured 2026-08-08: only ~35% of US exits get a 200, so each rotation
+    # needs ~3 attempts on average. The cap only bites in the tail, and the tail
+    # is what takes a whole scan down: at a 65% block rate, 10 attempts fail
+    # outright 1.4% of the time but 25 attempts fail 0.002% of the time. Raising
+    # it costs nothing in the common case because we stop at the first success.
+    proxy_max_ip_attempts: int = 25
     # Separate, much smaller budget for unreachable exits. A timeout costs the
     # full read timeout in wall clock (a block fails instantly), so retrying as
     # many times as we retry blocks would exhaust the scan budget. We still

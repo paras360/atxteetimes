@@ -81,11 +81,33 @@ Two things matter in that URL:
 - **Target US IPs** (`username__cr.us` on DataImpulse). This is a City of Austin
   site.
 
-Roughly half of residential exit IPs are already WAF-blocked, so a blocked fetch
+Most residential exit IPs are already WAF-blocked, so a blocked fetch
 automatically hops to a different sticky port (up to `PROXY_MAX_IP_ATTEMPTS`,
-default 10) instead of failing the scan. At a ~45% per-IP success rate, the odds
-of all 10 failing are under 0.1%, so the circuit breaker should never fire while
-a proxy is configured.
+default 25) instead of failing the scan. Measured on 2026-08-08, only about 35%
+of US exits return a 200, so a rotation takes ~3 attempts on average and the cap
+only matters in the tail. That tail is worth paying for: at a 65% block rate, 10
+attempts fail outright 1.4% of the time (which is enough to lose several scans a
+day) while 25 attempts fail 0.002% of the time.
+
+Re-measure the current block rate before changing the cap:
+
+```bash
+docker compose exec -T app python - <<'PY'
+import random, re
+from curl_cffi import requests as cffi
+from backend.app.config import get_settings
+s = get_settings()
+ok = 0
+for _ in range(20):
+    px = re.sub(r":(\d+)$", f":{random.randint(s.proxy_port_min, s.proxy_port_max)}", s.scraper_proxy)
+    try:
+        ok += cffi.get(s.webtrac_base_url + "/search.html?display=detail&module=GR",
+                       impersonate="chrome", proxy=px, timeout=(8, 20)).status_code == 200
+    except Exception:
+        pass
+print(f"{ok}/20 exits usable")
+PY
+```
 
 An exit IP that *times out* rather than returning 403 is rotated away just as
 eagerly, but with its own smaller budget (`PROXY_MAX_TIMEOUT_ATTEMPTS`, default
